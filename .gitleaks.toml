@@ -1,0 +1,32 @@
+# Gitleaks configuration for Volc Agent Launchpad.
+#
+# The hackathon acceptance checklist requires that no secret appears in source,
+# Git history, logs, traces, screenshots, browser storage, or demo output. This
+# config extends the upstream default ruleset and allowlists only the documented
+# placeholder values that must remain readable in the repository.
+
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Documented placeholders and non-secret fixtures"
+
+paths = [
+  # Lockfiles contain integrity hashes that look like high-entropy secrets.
+  '''package-lock\.json''',
+  '''deploy/volcengine/\.terraform\.lock\.hcl''',
+]
+
+regexes = [
+  # Placeholder values shipped in .env.example and the README. These are
+  # instructions to the reader, not credentials.
+  '''replace-with-.*''',
+  '''ep-your-endpoint-id''',
+  '''ep-replace-with-your-endpoint-id''',
+  '''your-ark-api-key''',
+
+  # Test fixture in apps/server/src/container-codex-runner.test.ts. The whole
+  # point of that string is to assert the key never reaches argv, so it must
+  # stay greppable.
+  '''secret-that-must-not-appear-in-argv''',
+]

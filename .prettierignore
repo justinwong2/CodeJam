@@ -1,0 +1,14 @@
+node_modules/
+dist/
+coverage/
+.data/
+.local/
+workspaces/
+codex-home/
+package-lock.json
+
+# Vendored / generated infrastructure files.
+deploy/volcengine/.terraform.lock.hcl
+
+# Hackathon brief exported from Feishu; not ours to reformat.
+docs/hackathon-v2-*.xml

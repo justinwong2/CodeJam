@@ -1,0 +1,51 @@
+name: Quality
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# Cancel superseded runs on the same branch; hackathon iteration is fast and
+# stale runs only burn minutes.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    name: Lint, typecheck, test, build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "npm"
+
+      # `npm ci` (not `npm install`) so the lockfile is authoritative and CI
+      # fails loudly if package.json and package-lock.json drift apart.
+      - name: Install dependencies
+        run: npm ci
+
+      # Mirrors the acceptance-checklist command exactly. Keep this as a single
+      # `npm run check` rather than splitting into steps, so that what CI runs
+      # and what a reviewer runs locally can never diverge.
+      - name: Run quality gate
+        run: npm run check
+
+  secrets:
+    name: Secret scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Full history: the acceptance checklist requires that no secret
+          # appears in Git history, not just in the current tree.
+          fetch-depth: 0
+
+      - name: Scan for committed secrets
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
