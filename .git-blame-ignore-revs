@@ -1,0 +1,9 @@
+# Revisions to skip when running git blame.
+#
+# Usage (one-time, per clone):
+#   git config blame.ignoreRevsFile .git-blame-ignore-revs
+#
+# GitHub honours this file automatically in its blame view.
+
+# Apply Prettier to the existing codebase (formatting only, no behavior change)
+44370d83d155e95c32eb81ee4c83bc0112613dc1

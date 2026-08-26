@@ -14,3 +14,6 @@ coverage/
 deploy/volcengine/.terraform/
 deploy/volcengine/*.tfstate*
 deploy/volcengine/terraform.tfvars
+
+# Personal Claude Code overrides (never shared).
+.claude/settings.local.json
