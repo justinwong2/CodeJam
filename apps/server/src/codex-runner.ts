@@ -53,14 +53,22 @@ export function parseCodexEventLine(line: string, parsed: ParsedEvents): void {
     parsed.threadId = event.thread_id;
   }
 
-  if (event.type === "item.completed" && event.item && typeof event.item === "object") {
+  if (
+    event.type === "item.completed" &&
+    event.item &&
+    typeof event.item === "object"
+  ) {
     const item = event.item as Record<string, unknown>;
     if (item.type === "agent_message" && typeof item.text === "string") {
       parsed.messages.push(item.text);
     }
   }
 
-  if (event.type === "turn.completed" && event.usage && typeof event.usage === "object") {
+  if (
+    event.type === "turn.completed" &&
+    event.usage &&
+    typeof event.usage === "object"
+  ) {
     const usage = event.usage as Record<string, unknown>;
     parsed.usage = {
       ...(typeof usage.input_tokens === "number"
@@ -202,13 +210,16 @@ export class CodexRunner implements AgentRunner {
         throw new RunCancelledError();
       }
       if (active.timedOut) {
-        throw new Error("Codex timed out after " + this.config.codexTimeoutMs + " ms");
+        throw new Error(
+          "Codex timed out after " + this.config.codexTimeoutMs + " ms",
+        );
       }
       if (active.outputExceeded) {
         throw new Error("Codex output exceeded CODEX_MAX_OUTPUT_BYTES");
       }
       if (exitCode !== 0) {
-        const detail = parsed.errors.at(-1) ?? stderr.trim() ?? "No error detail";
+        const detail =
+          parsed.errors.at(-1) ?? stderr.trim() ?? "No error detail";
         throw new Error("Codex exited with code " + exitCode + ": " + detail);
       }
       const output = parsed.messages.at(-1)?.trim();
@@ -231,10 +242,14 @@ export class CodexRunner implements AgentRunner {
     child: ChildProcess;
     forceKillTimer: NodeJS.Timeout | null;
   }): void {
-    if (active.child.exitCode !== null || active.child.signalCode !== null) return;
+    if (active.child.exitCode !== null || active.child.signalCode !== null)
+      return;
     active.child.kill("SIGTERM");
     if (!active.forceKillTimer) {
-      active.forceKillTimer = setTimeout(() => active.child.kill("SIGKILL"), 3_000);
+      active.forceKillTimer = setTimeout(
+        () => active.child.kill("SIGKILL"),
+        3_000,
+      );
       active.forceKillTimer.unref();
     }
   }
@@ -260,7 +275,8 @@ export class CodexRunner implements AgentRunner {
       NO_COLOR: "1",
     };
     for (const name of inheritedNames) {
-      if (process.env[name] !== undefined) environment[name] = process.env[name];
+      if (process.env[name] !== undefined)
+        environment[name] = process.env[name];
     }
     return environment;
   }

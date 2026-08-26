@@ -29,13 +29,15 @@ const temporaryDirectories: string[] = [];
 afterEach(async () => {
   const { rm } = await import("node:fs/promises");
   await Promise.all(
-    temporaryDirectories.splice(0).map((directory) =>
-      rm(directory, { recursive: true, force: true }),
-    ),
+    temporaryDirectories
+      .splice(0)
+      .map((directory) => rm(directory, { recursive: true, force: true })),
   );
 });
 
-async function makeService(runner: AgentRunner = new FakeRunner()): Promise<AgentService> {
+async function makeService(
+  runner: AgentRunner = new FakeRunner(),
+): Promise<AgentService> {
   const root = await mkdtemp(path.join(tmpdir(), "launchpad-test-"));
   temporaryDirectories.push(root);
   const config = loadConfig({
@@ -61,8 +63,10 @@ describe("Agent lifecycle", () => {
     const service = await makeService();
     const agent = await service.createAgent({ name: "Builder" });
     expect(service.listAgents()).toHaveLength(1);
-    expect((await service.updateAgent(agent.id, { description: "Builds apps" })).description)
-      .toBe("Builds apps");
+    expect(
+      (await service.updateAgent(agent.id, { description: "Builds apps" }))
+        .description,
+    ).toBe("Builds apps");
     expect((await service.stopAgent(agent.id)).status).toBe("stopped");
     expect((await service.startAgent(agent.id)).status).toBe("ready");
     await service.deleteAgent(agent.id);
@@ -75,7 +79,10 @@ describe("Agent lifecycle", () => {
     const { run } = await service.sendMessage(agent.id, "write hello world");
     await expect.poll(() => service.getRun(run.id).status).toBe("completed");
     const messages = service.getMessages(agent.id);
-    expect(messages.map((message) => message.role)).toEqual(["user", "assistant"]);
+    expect(messages.map((message) => message.role)).toEqual([
+      "user",
+      "assistant",
+    ]);
     expect(messages[1]?.content).toContain("write hello world");
     expect(service.getAgent(agent.id).codexThreadId).toBe("fake-thread");
   });
@@ -97,7 +104,9 @@ describe("Agent lifecycle", () => {
       service.sendMessage(agent.id, "second"),
     ]);
 
-    expect(attempts.filter((attempt) => attempt.status === "fulfilled")).toHaveLength(1);
+    expect(
+      attempts.filter((attempt) => attempt.status === "fulfilled"),
+    ).toHaveLength(1);
     const rejected = attempts.find((attempt) => attempt.status === "rejected");
     expect(rejected).toMatchObject({ reason: { statusCode: 409 } });
     expect(service.getMessages(agent.id)).toHaveLength(1);
@@ -105,7 +114,9 @@ describe("Agent lifecycle", () => {
     finish({ output: "done", threadId: "thread", usage: null });
     const accepted = attempts.find((attempt) => attempt.status === "fulfilled");
     if (accepted?.status === "fulfilled") {
-      await expect.poll(() => service.getRun(accepted.value.run.id).status).toBe("completed");
+      await expect
+        .poll(() => service.getRun(accepted.value.run.id).status)
+        .toBe("completed");
     }
   });
 
@@ -122,10 +133,14 @@ describe("Agent lifecycle", () => {
     const agent = await service.createAgent({ name: "Busy" });
     const { run } = await service.sendMessage(agent.id, "first");
 
-    await expect(service.startAgent(agent.id)).rejects.toMatchObject({ statusCode: 409 });
-    await expect(service.sendMessage(agent.id, "second")).rejects.toMatchObject({
+    await expect(service.startAgent(agent.id)).rejects.toMatchObject({
       statusCode: 409,
     });
+    await expect(service.sendMessage(agent.id, "second")).rejects.toMatchObject(
+      {
+        statusCode: 409,
+      },
+    );
 
     finish({ output: "done", threadId: "thread", usage: null });
     await expect.poll(() => service.getRun(run.id).status).toBe("completed");

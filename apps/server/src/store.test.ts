@@ -8,9 +8,9 @@ const temporaryDirectories: string[] = [];
 
 afterEach(async () => {
   await Promise.all(
-    temporaryDirectories.splice(0).map((directory) =>
-      rm(directory, { recursive: true, force: true }),
-    ),
+    temporaryDirectories
+      .splice(0)
+      .map((directory) => rm(directory, { recursive: true, force: true })),
   );
 });
 
@@ -49,8 +49,8 @@ describe("JsonStore", () => {
         createdAt: new Date().toISOString(),
       });
     });
-    expect(store.snapshot().messages.map((message) => message.content)).toEqual([
-      "queue recovered",
-    ]);
+    expect(store.snapshot().messages.map((message) => message.content)).toEqual(
+      ["queue recovered"],
+    );
   });
 });

@@ -55,11 +55,11 @@ as the new control.
 
 ## Three-day plan
 
-| Day | Goal |
-| --- | --- |
-| 1 | Start the POC, select one story, define the middleware contract, and complete the backend path. |
-| 2 | Finish enforcement or instrumentation, add the minimum UI, and implement positive and negative cases. |
-| 3 | Add tests, handle failures, finish the diagram, and rehearse the demo. |
+| Day | Goal                                                                                                  |
+| --- | ----------------------------------------------------------------------------------------------------- |
+| 1   | Start the POC, select one story, define the middleware contract, and complete the backend path.       |
+| 2   | Finish enforcement or instrumentation, add the minimum UI, and implement positive and negative cases. |
+| 3   | Add tests, handle failures, finish the diagram, and rehearse the demo.                                |
 
 ## Deliverables
 
@@ -71,12 +71,12 @@ Only three deliverables are required:
 
 ## Evaluation
 
-| Category | Weight |
-| --- | ---: |
-| End-to-end middleware behavior | 40% |
-| Technical design and integration | 25% |
-| Verification and robustness | 20% |
-| Demo and reproducibility | 15% |
+| Category                         | Weight |
+| -------------------------------- | -----: |
+| End-to-end middleware behavior   |    40% |
+| Technical design and integration |    25% |
+| Verification and robustness      |    20% |
+| Demo and reproducibility         |    15% |
 
 ## Acceptance checklist
 

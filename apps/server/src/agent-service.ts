@@ -49,7 +49,9 @@ export class AgentService {
   listAgents(): Agent[] {
     return this.store
       .snapshot()
-      .agents.sort((left, right) => right.updatedAt.localeCompare(left.updatedAt));
+      .agents.sort((left, right) =>
+        right.updatedAt.localeCompare(left.updatedAt),
+      );
   }
 
   getAgent(id: string): Agent {
@@ -91,11 +93,16 @@ export class AgentService {
         throw new HttpError(404, "Agent not found");
       }
       if (agent.status === "busy") {
-        throw new HttpError(409, "Stop the active run before editing this Agent");
+        throw new HttpError(
+          409,
+          "Stop the active run before editing this Agent",
+        );
       }
       if (input.name !== undefined) agent.name = input.name.trim();
-      if (input.description !== undefined) agent.description = input.description.trim();
-      if (input.instructions !== undefined) agent.instructions = input.instructions.trim();
+      if (input.description !== undefined)
+        agent.description = input.description.trim();
+      if (input.instructions !== undefined)
+        agent.instructions = input.instructions.trim();
       agent.lastError = null;
       agent.updatedAt = now();
       return structuredClone(agent);
@@ -110,7 +117,9 @@ export class AgentService {
     const archivedWorkspace = await this.workspaces.archive(agent);
     await this.store.mutate((database) => {
       database.agents = database.agents.filter((item) => item.id !== id);
-      database.messages = database.messages.filter((item) => item.agentId !== id);
+      database.messages = database.messages.filter(
+        (item) => item.agentId !== id,
+      );
       database.runs = database.runs.filter((item) => item.agentId !== id);
     });
     return { archivedWorkspace };
@@ -253,7 +262,9 @@ export class AgentService {
       const completedAt = now();
       await this.store.mutate((database) => {
         const storedRun = database.runs.find((item) => item.id === run.id);
-        const agent = database.agents.find((item) => item.id === agentAtStart.id);
+        const agent = database.agents.find(
+          (item) => item.id === agentAtStart.id,
+        );
         if (!storedRun || !agent) return;
         storedRun.status = "completed";
         storedRun.output = result.output;
@@ -278,7 +289,9 @@ export class AgentService {
       const message = error instanceof Error ? error.message : String(error);
       await this.store.mutate((database) => {
         const storedRun = database.runs.find((item) => item.id === run.id);
-        const agent = database.agents.find((item) => item.id === agentAtStart.id);
+        const agent = database.agents.find(
+          (item) => item.id === agentAtStart.id,
+        );
         if (storedRun) {
           storedRun.status = cancelled ? "cancelled" : "failed";
           storedRun.error = message;
@@ -302,7 +315,10 @@ export class AgentService {
         throw new HttpError(404, "Agent not found");
       }
       if (status === "ready" && agent.status === "busy") {
-        throw new HttpError(409, "Stop the active run before starting this Agent");
+        throw new HttpError(
+          409,
+          "Stop the active run before starting this Agent",
+        );
       }
       agent.status = status;
       if (status === "ready") agent.lastError = null;

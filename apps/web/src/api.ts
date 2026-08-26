@@ -25,7 +25,9 @@ async function request<T>(url: string, options?: RequestInit): Promise<T> {
     ...options,
     headers,
   });
-  const data = (await response.json().catch(() => ({}))) as T & { error?: string };
+  const data = (await response.json().catch(() => ({}))) as T & {
+    error?: string;
+  };
   if (!response.ok) {
     throw new ApiError(data.error ?? "Request failed", response.status);
   }

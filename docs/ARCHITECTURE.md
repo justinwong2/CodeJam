@@ -64,19 +64,19 @@ the stored Codex thread, and escalate termination after a grace period.
 
 ## Deployment profiles
 
-| Profile | Control plane | Agent execution |
-| --- | --- | --- |
-| Local POC | Host Node.js | Disposable local container |
-| ECS | Application container | Codex process in the same container |
-| Local development | Host Node.js | Host Codex process |
+| Profile           | Control plane         | Agent execution                     |
+| ----------------- | --------------------- | ----------------------------------- |
+| Local POC         | Host Node.js          | Disposable local container          |
+| ECS               | Application container | Codex process in the same container |
+| Local development | Host Node.js          | Host Codex process                  |
 
 ## Extension seams
 
-| Track | Primary seam | Expected change |
-| --- | --- | --- |
-| Glass Box | `AgentRunner`, `AgentRun` | Emit and display correlated execution events. |
-| Bouncer | API routes, Agent ownership | Add identity and server-side authorization. |
-| Kill Switch | `AgentRunner` | Add threat-specific policy or a stronger sandbox. |
+| Track       | Primary seam                | Expected change                                   |
+| ----------- | --------------------------- | ------------------------------------------------- |
+| Glass Box   | `AgentRunner`, `AgentRun`   | Emit and display correlated execution events.     |
+| Bouncer     | API routes, Agent ownership | Add identity and server-side authorization.       |
+| Kill Switch | `AgentRunner`               | Add threat-specific policy or a stronger sandbox. |
 
 The current container or ECS instance is the POC trust boundary. Ordinary
 containers are not hardened multi-tenant isolation.

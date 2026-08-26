@@ -40,7 +40,10 @@ export function buildContainerRunArgs(
   config: AppConfig,
 ): string[] {
   const name = containerName(request.agentId, config.runtimeInstanceId);
-  const engineName = config.containerEngine.split(/[\\/]/).at(-1)?.toLowerCase();
+  const engineName = config.containerEngine
+    .split(/[\\/]/)
+    .at(-1)
+    ?.toLowerCase();
   return [
     "run",
     "--rm",
@@ -130,7 +133,10 @@ export class ContainerCodexRunner implements AgentRunner {
         .then(() => undefined)
         .catch(() => {
           active.child.kill("SIGTERM");
-          const forceKill = setTimeout(() => active.child.kill("SIGKILL"), 3_000);
+          const forceKill = setTimeout(
+            () => active.child.kill("SIGKILL"),
+            3_000,
+          );
           forceKill.unref();
         });
     }
@@ -157,7 +163,10 @@ export class ContainerCodexRunner implements AgentRunner {
     });
     const active: ActiveContainer = {
       child,
-      containerName: containerName(request.agentId, this.config.runtimeInstanceId),
+      containerName: containerName(
+        request.agentId,
+        this.config.runtimeInstanceId,
+      ),
       cancelled: false,
       timedOut: false,
       outputExceeded: false,
@@ -211,13 +220,16 @@ export class ContainerCodexRunner implements AgentRunner {
       if (stdout.trim()) parseCodexEventLine(stdout.trim(), parsed);
       if (active.cancelled) throw new RunCancelledError();
       if (active.timedOut) {
-        throw new Error("Runtime timed out after " + this.config.codexTimeoutMs + " ms");
+        throw new Error(
+          "Runtime timed out after " + this.config.codexTimeoutMs + " ms",
+        );
       }
       if (active.outputExceeded) {
         throw new Error("Codex output exceeded CODEX_MAX_OUTPUT_BYTES");
       }
       if (exitCode !== 0) {
-        const detail = parsed.errors.at(-1) ?? stderr.trim() ?? "No error detail";
+        const detail =
+          parsed.errors.at(-1) ?? stderr.trim() ?? "No error detail";
         throw new Error(
           this.config.containerEngine +
             " Runtime exited with code " +
@@ -248,7 +260,8 @@ export class ContainerCodexRunner implements AgentRunner {
       "LC_ALL",
       "XDG_RUNTIME_DIR",
     ] as const) {
-      if (process.env[name] !== undefined) environment[name] = process.env[name];
+      if (process.env[name] !== undefined)
+        environment[name] = process.env[name];
     }
     return environment;
   }

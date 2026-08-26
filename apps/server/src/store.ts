@@ -36,7 +36,9 @@ export class JsonStore {
     return structuredClone(this.data);
   }
 
-  async mutate<T>(mutation: (database: Database) => T | Promise<T>): Promise<T> {
+  async mutate<T>(
+    mutation: (database: Database) => T | Promise<T>,
+  ): Promise<T> {
     let result!: T;
     const operation = this.queue.then(async () => {
       const next = structuredClone(this.data);

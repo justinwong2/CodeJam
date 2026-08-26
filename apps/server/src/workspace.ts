@@ -59,7 +59,11 @@ export class WorkspaceManager {
     ]
       .filter((line, index, lines) => !(line === "" && lines[index - 1] === ""))
       .join("\n");
-    await writeFile(path.join(agent.workspacePath, "AGENTS.md"), content, "utf8");
+    await writeFile(
+      path.join(agent.workspacePath, "AGENTS.md"),
+      content,
+      "utf8",
+    );
   }
 
   async archive(agent: Agent): Promise<string> {

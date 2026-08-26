@@ -15,10 +15,12 @@ const createAgentBody = z.object({
   description: z.string().max(500).optional(),
   instructions: z.string().max(10_000).optional(),
 });
-const updateAgentBody = createAgentBody.partial().refine(
-  (value) => Object.keys(value).length > 0,
-  "At least one field is required",
-);
+const updateAgentBody = createAgentBody
+  .partial()
+  .refine(
+    (value) => Object.keys(value).length > 0,
+    "At least one field is required",
+  );
 const messageBody = z.object({
   content: z.string().trim().min(1).max(50_000),
 });
