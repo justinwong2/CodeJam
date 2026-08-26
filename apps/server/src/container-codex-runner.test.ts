@@ -1,3 +1,4 @@
+import path from "node:path";
 import { describe, expect, it } from "vitest";
 import { loadConfig } from "./config.js";
 import {
@@ -5,13 +6,19 @@ import {
   containerName,
 } from "./container-codex-runner.js";
 
+// loadConfig runs CODEX_HOME through path.resolve, so the mounted source path
+// is platform-dependent: "/tmp/codex-home" on POSIX, "C:\tmp\codex-home" on
+// Windows. Resolve it here too so the expectation matches on every host.
+const CODEX_HOME = "/tmp/codex-home";
+const RESOLVED_CODEX_HOME = path.resolve(CODEX_HOME);
+
 describe("Container Codex runner", () => {
   it("builds an isolated Docker/Podman-compatible invocation", () => {
     const config = loadConfig({
       NODE_ENV: "test",
       ARK_API_KEY: "secret-that-must-not-appear-in-argv",
       ARK_MODEL: "ep-test",
-      CODEX_HOME: "/tmp/codex-home",
+      CODEX_HOME,
       RUNTIME_PROVIDER: "container",
       CONTAINER_ENGINE: "podman",
       CONTAINER_RUNTIME_IMAGE: "runtime:test",
@@ -33,7 +40,9 @@ describe("Container Codex runner", () => {
     );
     expect(args).toContain("runtime:test");
     expect(args).toContain("type=bind,src=/tmp/agent-workspace,dst=/workspace");
-    expect(args).toContain("type=bind,src=/tmp/codex-home,dst=/codex-home");
+    expect(args).toContain(
+      `type=bind,src=${RESOLVED_CODEX_HOME},dst=/codex-home`,
+    );
     expect(args).toContain("501:20");
     expect(args).toContain("workspace-write");
     expect(args).toContain("/workspace");
@@ -45,7 +54,7 @@ describe("Container Codex runner", () => {
   it("resumes a thread inside the mounted Runtime workspace", () => {
     const config = loadConfig({
       NODE_ENV: "test",
-      CODEX_HOME: "/tmp/codex-home",
+      CODEX_HOME,
       RUNTIME_PROVIDER: "container",
     });
     const args = buildContainerRunArgs(
