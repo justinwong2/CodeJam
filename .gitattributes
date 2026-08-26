@@ -1,0 +1,24 @@
+# Normalize line endings across the team.
+#
+# The team mixes Windows, macOS, and Linux, CI runs on Linux, and the Runtime
+# is a Linux container. Without this file, a Windows checkout (core.autocrlf=true)
+# writes CRLF into the working tree, and any shell script COPY'd into the
+# container fails at exec time with "bad interpreter: /bin/bash^M".
+#
+# Declaring eol=lf keeps the working tree LF on every platform, so scripts,
+# Dockerfiles, and Prettier all agree.
+
+* text=auto eol=lf
+
+# Files that MUST be LF or they break at runtime.
+*.sh    text eol=lf
+Dockerfile*     text eol=lf
+*.yml   text eol=lf
+*.yaml  text eol=lf
+
+# Binary assets: never touch.
+*.jpg   binary
+*.png   binary
+*.gif   binary
+*.ico   binary
+*.pdf   binary
