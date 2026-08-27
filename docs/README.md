@@ -15,12 +15,12 @@ updated when behavior changes.
 
 ## Architecture And Operations
 
-| Doc                                                          | Canonical for                      |
-| ------------------------------------------------------------ | ---------------------------------- |
-| [ARCHITECTURE.md](ARCHITECTURE.md)                           | Component and extension boundaries |
-| [DEPLOYMENT.md](DEPLOYMENT.md)                               | ECS and Terraform deployment       |
-| [LOCAL_POC.md](LOCAL_POC.md)                                 | Docker, Colima, rootless Podman    |
-| [HACKATHON_EXTENSION_GUIDE.md](HACKATHON_EXTENSION_GUIDE.md) | Organizer extension guidance       |
+| Doc                                      | Canonical for                            |
+| ---------------------------------------- | ---------------------------------------- |
+| [ARCHITECTURE.md](ARCHITECTURE.md)       | Component and extension boundaries       |
+| [DEPLOYMENT.md](DEPLOYMENT.md)           | ECS and Terraform deployment             |
+| [LOCAL_POC.md](LOCAL_POC.md)             | Docker, Colima, rootless Podman          |
+| [HACKATHON_BRIEF.md](HACKATHON_BRIEF.md) | Final challenge brief, rubric, checklist |
 
 There is no root `ARCHITECTURE.md`; `docs/ARCHITECTURE.md` is the only
 architecture document. Do not create a second one.
@@ -39,9 +39,17 @@ design summary."
 
 ## Reference Material
 
-`hackathon-v2-section-*.xml` and `hackathon-v2-skeleton.xml` are the organizers'
-challenge brief, exported from Feishu. They are **read-only reference**: do not
-edit or reformat them. Prettier is configured to ignore them.
+[HACKATHON_BRIEF.md](HACKATHON_BRIEF.md) is the **final** organizer brief
+(transcribed from Feishu, 2026-08-27) and is canonical for challenge
+requirements, rubric, and checklist.
+
+`hackathon-v2-section-*.xml`, `hackathon-v2-skeleton.xml`, and
+[HACKATHON_EXTENSION_GUIDE.md](HACKATHON_EXTENSION_GUIDE.md) are **earlier
+drafts** of that brief which shipped inside the Starter Kit. They are retained
+read-only for historical reference: do not edit or reformat them, and do not
+plan against them — notably, they say "choose exactly one middleware track,"
+a rule the final brief replaced with "recommended examples, not a prescribed
+checklist." Prettier is configured to ignore the XML files.
 
 `assets/` holds README screenshots.
 
@@ -108,5 +116,6 @@ When behavior changes, update at minimum:
 - `docs/ARCHITECTURE.md` is canonical for system shape.
 - `.env.example` is canonical for the full variable list; `README.md` and
   `CLAUDE.md` carry summaries.
-- The `hackathon-v2-*.xml` files are canonical for challenge requirements and
-  are never edited by us.
+- `docs/HACKATHON_BRIEF.md` is canonical for challenge requirements. The
+  `hackathon-v2-*.xml` files and `HACKATHON_EXTENSION_GUIDE.md` are superseded
+  drafts and are never edited by us.

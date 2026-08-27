@@ -38,6 +38,6 @@ Copy [TEMPLATE.md](TEMPLATE.md) to start a new record.
 
 ## Index
 
-| Date       | Decision | Status |
-| ---------- | -------- | ------ |
-| _none yet_ |          |        |
+| Date       | Decision                                                   | Status   |
+| ---------- | ---------------------------------------------------------- | -------- |
+| 2026-08-27 | [Agent Access Gateway](2026-08-27-agent-access-gateway.md) | Proposed |

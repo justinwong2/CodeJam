@@ -251,5 +251,5 @@ audit direction, this section must be rewritten to describe what was built.
 - [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) — component and extension boundaries
 - [docs/adr/](docs/adr/) — architecture decision records
 - [docs/specs/](docs/specs/) — feature design specs
-- [docs/HACKATHON_EXTENSION_GUIDE.md](docs/HACKATHON_EXTENSION_GUIDE.md) — organizer guidance
+- [docs/HACKATHON_BRIEF.md](docs/HACKATHON_BRIEF.md) — final organizer brief, rubric, checklist
 - [SECURITY.md](SECURITY.md) — security policy and known limitations
