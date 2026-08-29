@@ -15,6 +15,7 @@ import type {
   RunSession,
   RunSessionDirectory,
   UpdateAgentInput,
+  User,
 } from "./types.js";
 import { WorkspaceManager } from "./workspace.js";
 
@@ -79,6 +80,18 @@ export class AgentService implements RunSessionDirectory {
         }
       }
     });
+  }
+
+  /** The seeded humans, in seeded order — the switcher's list. */
+  listUsers(): User[] {
+    return this.store.select((database) => database.users);
+  }
+
+  /** The seeded human behind an id, or nothing if no such human exists. */
+  findUser(id: string): User | undefined {
+    return this.store.select((database) =>
+      database.users.find((user) => user.id === id),
+    );
   }
 
   listAgents(): Agent[] {

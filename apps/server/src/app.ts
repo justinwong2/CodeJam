@@ -1,13 +1,23 @@
 import cors from "@fastify/cors";
 import fastifyStatic from "@fastify/static";
-import Fastify, { type FastifyInstance } from "fastify";
+import Fastify, { type FastifyInstance, type FastifyRequest } from "fastify";
 import { timingSafeEqual } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { z } from "zod";
 import type { AppConfig } from "./config.js";
 import { HttpError } from "./errors.js";
 import { registerGateway } from "./gateway.js";
+import { DEFAULT_OWNER_ID } from "./types.js";
+import type { User } from "./types.js";
 import type { AgentService } from "./agent-service.js";
+
+/**
+ * Which human the browser is acting as. Mock authentication by design — the
+ * gateway's subject is authorization, not proving who someone is — so the
+ * switcher names a seeded user and the server validates that it exists.
+ */
+const ACTING_USER_HEADER = "x-launchpad-user";
+const actingUserHeader = z.string().trim().min(1).optional();
 
 const agentIdParams = z.object({ id: z.string().uuid() });
 const runIdParams = z.object({ id: z.string().uuid() });
@@ -25,6 +35,23 @@ const updateAgentBody = createAgentBody
 const messageBody = z.object({
   content: z.string().trim().min(1).max(50_000),
 });
+
+/**
+ * The human a browser request acts as: the named seeded user, or the default
+ * owner when no user is named. A named user who does not exist is a client
+ * mistake and is refused — acting as somebody else instead would hand the
+ * caller whichever permissions the fallback happens to have.
+ */
+function actingUser(request: FastifyRequest, service: AgentService): User {
+  const named =
+    actingUserHeader.parse(request.headers[ACTING_USER_HEADER]) ??
+    DEFAULT_OWNER_ID;
+  const user = service.findUser(named);
+  if (!user) {
+    throw new HttpError(400, `Unknown user "${named}"`);
+  }
+  return user;
+}
 
 export async function createApp(
   config: AppConfig,
@@ -66,6 +93,16 @@ export async function createApp(
     }
   });
 
+  // Resolving the acting human here, rather than only where ownership is
+  // stamped, means a browser request naming a user who does not exist is
+  // refused everywhere instead of on the one route that happens to read it.
+  app.addHook("onRequest", async (request) => {
+    if (!request.url.startsWith("/api/")) {
+      return;
+    }
+    actingUser(request, service);
+  });
+
   // Agent-facing routes. The onRequest hook above guards /api/* only, so the
   // gateway is deliberately outside APP_AUTH_TOKEN: agents authenticate with
   // their own per-run credential, which the service mints and can revoke.
@@ -80,11 +117,16 @@ export async function createApp(
 
   app.get("/api/system", async () => service.systemInfo());
 
+  app.get("/api/users", async () => ({ users: service.listUsers() }));
+
   app.get("/api/agents", async () => ({ agents: service.listAgents() }));
 
   app.post("/api/agents", async (request, reply) => {
     const body = createAgentBody.parse(request.body);
-    const agent = await service.createAgent(body);
+    const agent = await service.createAgent(
+      body,
+      actingUser(request, service).id,
+    );
     return reply.code(201).send({ agent });
   });
 

@@ -1,12 +1,77 @@
-import { describe, expect, it } from "vitest";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import path from "node:path";
+import { afterEach, describe, expect, it } from "vitest";
+import { AgentService } from "./agent-service.js";
 import { createApp } from "./app.js";
 import { loadConfig } from "./config.js";
-import type { AgentService } from "./agent-service.js";
+import { JsonStore, SEED_USERS } from "./store.js";
+import type { Agent, AgentRunner } from "./types.js";
+import { WorkspaceManager } from "./workspace.js";
 
 const service = {
   listAgents: () => [],
+  listUsers: () => SEED_USERS,
+  findUser: (id: string) => SEED_USERS.find((user) => user.id === id),
   systemInfo: async () => ({}),
 } as unknown as AgentService;
+
+const idleRunner: AgentRunner = {
+  run: async () => ({ output: "", threadId: null, usage: null }),
+  cancel: async () => false,
+  isAvailable: async () => true,
+};
+
+const temporaryDirectories: string[] = [];
+
+afterEach(async () => {
+  await Promise.all(
+    temporaryDirectories
+      .splice(0)
+      .map((directory) => rm(directory, { recursive: true, force: true })),
+  );
+});
+
+/** An app over a real service, so ownership is asserted where it is stored. */
+async function appWithStore() {
+  const root = await mkdtemp(path.join(tmpdir(), "launchpad-app-test-"));
+  temporaryDirectories.push(root);
+  const config = loadConfig({
+    NODE_ENV: "test",
+    GATEWAY_JWT_SECRET: "gateway-test-signing-secret",
+    APP_DATA_DIR: path.join(root, "data"),
+    AGENT_WORKSPACE_ROOT: path.join(root, "workspaces"),
+    CODEX_HOME: path.join(root, "codex"),
+    ARK_API_KEY: "test-key",
+    ARK_MODEL: "ep-test",
+  });
+  const backing = new AgentService(
+    config,
+    new JsonStore(path.join(root, "data", "db.json")),
+    new WorkspaceManager(path.join(root, "workspaces")),
+    idleRunner,
+  );
+  await backing.initialize();
+  return { app: await createApp(config, backing), service: backing };
+}
+
+async function createAgentAs(
+  app: Awaited<ReturnType<typeof appWithStore>>["app"],
+  actingUser: string | undefined,
+  name: string,
+): Promise<{ statusCode: number; agent: Agent | undefined }> {
+  const response = await app.inject({
+    method: "POST",
+    url: "/api/agents",
+    ...(actingUser ? { headers: { "x-launchpad-user": actingUser } } : {}),
+    payload: { name },
+  });
+  const body = response.body ? (JSON.parse(response.body) as unknown) : {};
+  return {
+    statusCode: response.statusCode,
+    agent: (body as { agent?: Agent }).agent,
+  };
+}
 
 describe("HTTP boundary", () => {
   it("protects API routes with the configured shared token", async () => {
@@ -62,6 +127,85 @@ describe("HTTP boundary", () => {
       payload: JSON.stringify({ name: "x".repeat(1_100_000) }),
     });
     expect(oversized.statusCode).toBe(413);
+    await app.close();
+  });
+});
+
+describe("Acting user", () => {
+  it("lists the seeded users for the switcher", async () => {
+    const { app } = await appWithStore();
+    const response = await app.inject({ method: "GET", url: "/api/users" });
+    expect(response.statusCode).toBe(200);
+    expect(JSON.parse(response.body)).toEqual({
+      users: [
+        { id: "user-a", name: "User A", role: "admin" },
+        { id: "user-b", name: "User B", role: "basic" },
+      ],
+    });
+    await app.close();
+  });
+
+  it("stamps a created Agent with the acting user's ownership", async () => {
+    const { app, service: backing } = await appWithStore();
+    const created = await createAgentAs(app, "user-b", "Owned by B");
+    expect(created.statusCode).toBe(201);
+    expect(created.agent?.ownerId).toBe("user-b");
+
+    // Ownership is what the store holds, not just what the response echoed.
+    expect(backing.getAgent(created.agent?.id ?? "").ownerId).toBe("user-b");
+    await app.close();
+  });
+
+  it("defaults to the seeded owner when no user is named", async () => {
+    const { app } = await appWithStore();
+    const created = await createAgentAs(app, undefined, "Unattributed");
+    expect(created.statusCode).toBe(201);
+    expect(created.agent?.ownerId).toBe("user-a");
+    await app.close();
+  });
+
+  it("rejects an unknown acting user instead of falling back to the default", async () => {
+    const { app } = await appWithStore();
+    const created = await createAgentAs(app, "user-ghost", "Should not exist");
+    expect(created.statusCode).toBe(400);
+    expect(created.agent).toBeUndefined();
+
+    // The rejection is at the boundary, so a read route refuses it too.
+    const listed = await app.inject({
+      method: "GET",
+      url: "/api/agents",
+      headers: { "x-launchpad-user": "user-ghost" },
+    });
+    expect(listed.statusCode).toBe(400);
+
+    // ...and nothing was created along the way.
+    const agents = await app.inject({ method: "GET", url: "/api/agents" });
+    expect(JSON.parse(agents.body)).toEqual({ agents: [] });
+    await app.close();
+  });
+
+  it("rejects an ambiguous acting user sent twice", async () => {
+    const { app } = await appWithStore();
+    const response = await app.inject({
+      method: "GET",
+      url: "/api/agents",
+      headers: { "x-launchpad-user": ["user-a", "user-b"] },
+    });
+    expect(response.statusCode).toBe(400);
+    await app.close();
+  });
+
+  it("leaves the agent-facing gateway free of the browser's user header", async () => {
+    // The gateway's principal comes from the run credential, never from a
+    // header a caller can set, so an unknown user there is not a 400 here.
+    const { app } = await appWithStore();
+    const response = await app.inject({
+      method: "POST",
+      url: "/gateway/v1/responses",
+      headers: { "x-launchpad-user": "user-ghost" },
+      payload: { model: "ep-test" },
+    });
+    expect(response.statusCode).toBe(401);
     await app.close();
   });
 });
