@@ -72,6 +72,22 @@ async function makeService(
   return service;
 }
 
+/**
+ * Waits for runs to reach a terminal state. `mutate` swaps in the new state
+ * only after persisting it, so a terminal status is proof the run's last write
+ * is already on disk — which is what makes it safe to delete the directory.
+ */
+async function settle(
+  service: AgentService,
+  ...runIds: string[]
+): Promise<void> {
+  for (const runId of runIds) {
+    await expect
+      .poll(() => service.getRun(runId).status)
+      .not.toMatch(/^(queued|running)$/);
+  }
+}
+
 /** A runner that never finishes, so a run stays live while a test inspects it. */
 function pendingRunner(): {
   runner: AgentRunner;
@@ -199,6 +215,7 @@ describe("Run sessions", () => {
     expect(restarted.findRunSession(jwtId)?.revoked).toBe(true);
 
     first.finish({ output: "done", threadId: "thread", usage: null });
+    await settle(service, run.id);
   });
 
   it("revokes every live session for one Agent and leaves others alone", async () => {
@@ -206,8 +223,8 @@ describe("Run sessions", () => {
     const service = await makeService(runner);
     const target = await service.createAgent({ name: "Revoked" });
     const bystander = await service.createAgent({ name: "Untouched" });
-    await service.sendMessage(target.id, "long task");
-    await service.sendMessage(bystander.id, "also long");
+    const targetRun = await service.sendMessage(target.id, "long task");
+    const bystanderRun = await service.sendMessage(bystander.id, "also long");
     await expect.poll(() => requests.length).toBe(2);
 
     expect(await service.revokeAgentSessions(target.id)).toEqual({
@@ -221,7 +238,11 @@ describe("Run sessions", () => {
       revokedSessions: 0,
     });
 
+    // Both runs must reach a terminal state before the test returns: the write
+    // that records it lands in the temp data directory, and an unawaited one
+    // races `afterEach` removing that directory.
     finish({ output: "done", threadId: "thread", usage: null });
+    await settle(service, targetRun.run.id, bystanderRun.run.id);
   });
 
   it("refuses to revoke sessions for an Agent that does not exist", async () => {
