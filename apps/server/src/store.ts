@@ -6,6 +6,7 @@ import type {
   AgentRun,
   Database,
   Message,
+  MockDoc,
   RunSession,
   User,
 } from "./types.js";
@@ -23,6 +24,29 @@ export const SEED_USERS: User[] = [
   { id: "user-b", name: "User B", role: "basic" },
 ];
 
+/**
+ * The mock tool service's documents, one set per demo human. They exist to give
+ * ownership something to be about: A's documents are what B's Agent is denied,
+ * so the fixture is split across both owners deliberately.
+ */
+export const SEED_DOCS: MockDoc[] = [
+  {
+    id: "doc-a1",
+    ownerId: DEFAULT_OWNER_ID,
+    content: "User A quarterly plan: migrate the Runtime to the gateway.",
+  },
+  {
+    id: "doc-a2",
+    ownerId: DEFAULT_OWNER_ID,
+    content: "User A meeting notes: agree the rollout order with the team.",
+  },
+  {
+    id: "doc-b1",
+    ownerId: "user-b",
+    content: "User B onboarding notes: how to file a Runtime access request.",
+  },
+];
+
 const emptyDatabase = (): Database => ({
   version: DATABASE_VERSION,
   agents: [],
@@ -30,23 +54,23 @@ const emptyDatabase = (): Database => ({
   runs: [],
   sessions: [],
   users: structuredClone(SEED_USERS),
+  docs: structuredClone(SEED_DOCS),
 });
 
 const collection = <T>(value: unknown): T[] =>
   Array.isArray(value) ? (value as T[]) : [];
 
 /**
- * Adds any seeded user the file does not already carry. Seeding by id rather
+ * Adds any seeded row the file does not already carry. Seeding by id rather
  * than by "is the collection empty" is what keeps a restart from stacking a
- * second copy of every user beside the first.
+ * second copy of every fixture beside the first, and leaves a row an operator
+ * edited exactly as they left it.
  */
-function seedUsers(stored: User[]): User[] {
-  const present = new Set(stored.map((user) => user.id));
+function seeded<T extends { id: string }>(stored: T[], seeds: T[]): T[] {
+  const present = new Set(stored.map((row) => row.id));
   return [
     ...stored,
-    ...SEED_USERS.filter((user) => !present.has(user.id)).map((user) => ({
-      ...user,
-    })),
+    ...seeds.filter((row) => !present.has(row.id)).map((row) => ({ ...row })),
   ];
 }
 
@@ -83,7 +107,8 @@ export function migrateDatabase(parsed: unknown): Database {
     messages: collection<Message>(source.messages),
     runs: collection<AgentRun>(source.runs),
     sessions: collection<RunSession>(source.sessions),
-    users: seedUsers(collection<User>(source.users)),
+    users: seeded(collection<User>(source.users), SEED_USERS),
+    docs: seeded(collection<MockDoc>(source.docs), SEED_DOCS),
   };
 }
 

@@ -2,7 +2,12 @@ import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { DATABASE_VERSION, JsonStore, SEED_USERS } from "./store.js";
+import {
+  DATABASE_VERSION,
+  JsonStore,
+  SEED_DOCS,
+  SEED_USERS,
+} from "./store.js";
 import { DEFAULT_OWNER_ID } from "./types.js";
 
 const temporaryDirectories: string[] = [];
@@ -100,6 +105,7 @@ describe("JsonStore migration", () => {
       runs: [],
       sessions: [],
       users: SEED_USERS,
+      docs: SEED_DOCS,
     });
   });
 
@@ -156,6 +162,44 @@ describe("Seeded users and ownership", () => {
       { id: "user-b", name: "Renamed B", role: "basic" },
       { id: "user-a", name: "User A", role: "admin" },
     ]);
+  });
+
+  it("seeds the mock documents across both owners, once", async () => {
+    const filePath = await temporaryFile();
+    const store = new JsonStore(filePath);
+    await store.initialize();
+    // The fixture is only useful if both humans own some of it: an ownership
+    // denial needs a document the caller demonstrably does not own.
+    const owners = new Set(store.snapshot().docs.map((doc) => doc.ownerId));
+    expect(owners).toEqual(new Set([DEFAULT_OWNER_ID, "user-b"]));
+
+    const restarted = new JsonStore(filePath);
+    await restarted.initialize();
+    expect(restarted.snapshot().docs.map((doc) => doc.id)).toEqual(
+      SEED_DOCS.map((doc) => doc.id),
+    );
+  });
+
+  it("adds a missing seeded document without rewriting a stored one", async () => {
+    const filePath = await temporaryFile();
+    await writeFile(
+      filePath,
+      JSON.stringify({
+        version: DATABASE_VERSION,
+        docs: [{ id: "doc-a1", ownerId: "user-b", content: "reassigned" }],
+      }),
+      "utf8",
+    );
+
+    const store = new JsonStore(filePath);
+    await store.initialize();
+    const docs = store.snapshot().docs;
+    expect(docs[0]).toEqual({
+      id: "doc-a1",
+      ownerId: "user-b",
+      content: "reassigned",
+    });
+    expect(docs.map((doc) => doc.id)).toEqual(SEED_DOCS.map((doc) => doc.id));
   });
 
   it("gives an Agent stored before ownership existed the default owner", async () => {

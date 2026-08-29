@@ -105,6 +105,17 @@ export interface RunSession {
   expiresAt: string;
 }
 
+/**
+ * A document in the mock tool service. Ownership is the whole point of the
+ * fixture: it is the resource `can()` compares an Agent's owner against, and
+ * the thing an ownership denial protects.
+ */
+export interface MockDoc {
+  id: string;
+  ownerId: string;
+  content: string;
+}
+
 export interface Database {
   version: 2;
   agents: Agent[];
@@ -112,6 +123,7 @@ export interface Database {
   runs: AgentRun[];
   sessions: RunSession[];
   users: User[];
+  docs: MockDoc[];
 }
 
 export interface CreateAgentInput {
@@ -148,6 +160,20 @@ export interface RunnerRequest {
  */
 export interface RunSessionDirectory {
   findRunSession(jwtId: string): RunSession | undefined;
+}
+
+/**
+ * Everything the gateway reads to authorize an agent call. Permissions are
+ * resolved through here on every call rather than carried in the credential,
+ * so revoking a role takes effect at once instead of at token expiry.
+ *
+ * Every lookup answers with `undefined` rather than throwing: the gateway turns
+ * a missing record into a denial, and an exception would turn it into a 500.
+ */
+export interface GatewayDirectory extends RunSessionDirectory {
+  findAgent(id: string): Agent | undefined;
+  findUser(id: string): User | undefined;
+  findMockDoc(id: string): MockDoc | undefined;
 }
 
 export interface AgentRunner {
