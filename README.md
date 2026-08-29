@@ -242,7 +242,7 @@ docker compose config
 - [Architecture](docs/ARCHITECTURE.md)
 - [Local POC](docs/LOCAL_POC.md)
 - [Deployment](docs/DEPLOYMENT.md)
-- [Hackathon extension guide](docs/HACKATHON_EXTENSION_GUIDE.md)
+- [Hackathon brief (final)](docs/HACKATHON_BRIEF.md)
 - [Security policy](SECURITY.md)
 - [Contributing](CONTRIBUTING.md)
 
