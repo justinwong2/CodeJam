@@ -27,6 +27,15 @@ describe("HTTP boundary", () => {
       headers: { authorization: "Bearer a-strong-test-token" },
     });
     expect(allowed.statusCode).toBe(200);
+
+    // Revocation is an operator action with real consequences — an anonymous
+    // caller must not be able to cut every Agent off. This pins the route to
+    // the guarded side of the hook, wherever someone later moves it.
+    const revoke = await app.inject({
+      method: "POST",
+      url: "/api/agents/00000000-0000-4000-8000-000000000000/revoke",
+    });
+    expect(revoke.statusCode).toBe(401);
     await app.close();
   });
 

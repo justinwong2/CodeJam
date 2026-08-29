@@ -106,7 +106,10 @@ describe("Runner spawn environments", () => {
     const environment = spawnedEnvironment();
     expect(environment.ARK_API_KEY).toBeUndefined();
     expect(Object.values(environment)).not.toContain(ARK_KEY);
-    expect(environment[RUN_JWT_ENV_KEY]).toBeTruthy();
+    // Not merely "some token": the run's own credential. A runner that passed
+    // a stale or shared one would fail every gateway call at demo time while
+    // a truthiness check stayed green.
+    expect(environment[RUN_JWT_ENV_KEY]).toBe(request.runJwt);
   });
 
   it("spawns the container engine without the Ark key even when the server env holds it", async () => {
@@ -134,6 +137,8 @@ describe("Runner spawn environments", () => {
     const environment = spawnedEnvironment();
     expect(environment.ARK_API_KEY).toBeUndefined();
     expect(Object.values(environment)).not.toContain(ARK_KEY);
-    expect(environment[RUN_JWT_ENV_KEY]).toBeTruthy();
+    // `--env RUN_JWT` forwards by name, so this value is what actually lands
+    // inside the container: it must be this run's credential, not any token.
+    expect(environment[RUN_JWT_ENV_KEY]).toBe(request.runJwt);
   });
 });

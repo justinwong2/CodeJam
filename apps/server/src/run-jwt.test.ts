@@ -1,3 +1,4 @@
+import { createHmac } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import { signRunJwt, verifyRunJwt, type RunJwtClaims } from "./run-jwt.js";
 
@@ -79,22 +80,35 @@ describe("Run JWT", () => {
     expect(verifyRunJwt(SECRET, token, nowMs + 2_000).valid).toBe(false);
   });
 
-  it("refuses an unsigned token that claims its own algorithm", () => {
-    // The classic downgrade: alg "none" with an empty signature.
-    const forged = [
+  it("refuses a token naming another algorithm, however well it is signed", () => {
+    // Signed correctly over its own header, so the signature check cannot be
+    // what rejects these: only the algorithm check can. Tampering with the
+    // header of an existing token would be caught by the signature instead,
+    // and would leave the algorithm check untested.
+    const signedAs = (algorithm: string): string => {
+      const signingInput =
+        encode({ alg: algorithm, typ: "JWT" }) + "." + encode(claims());
+      return (
+        signingInput +
+        "." +
+        createHmac("sha256", SECRET).update(signingInput).digest("base64url")
+      );
+    };
+
+    // An attacker choosing the algorithm is the whole vulnerability class:
+    // "none" must not mean "trust me", and an algorithm we do not implement
+    // must not be verified as if it were HS256.
+    expect(verifyRunJwt(SECRET, signedAs("none")).valid).toBe(false);
+    expect(verifyRunJwt(SECRET, signedAs("HS512")).valid).toBe(false);
+    expect(verifyRunJwt(SECRET, signedAs("RS256")).valid).toBe(false);
+
+    // The classic unsigned form, empty signature and all.
+    const unsigned = [
       encode({ alg: "none", typ: "JWT" }),
       encode(claims()),
       "",
     ].join(".");
-    expect(verifyRunJwt(SECRET, forged).valid).toBe(false);
-
-    // ...and an algorithm we do not implement, even correctly HMAC-signed.
-    const wrongAlgorithm = tamper(
-      signRunJwt(SECRET, claims()),
-      0,
-      encode({ alg: "HS512", typ: "JWT" }),
-    );
-    expect(verifyRunJwt(SECRET, wrongAlgorithm).valid).toBe(false);
+    expect(verifyRunJwt(SECRET, unsigned).valid).toBe(false);
   });
 
   it("rejects malformed tokens without throwing", () => {
