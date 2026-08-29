@@ -15,6 +15,17 @@ const principal = (role: Role): Principal => ({
 });
 
 describe("can()", () => {
+  // The matrix below derives its expected outcomes from ROLE_TOOLS, so the
+  // seeded grants must be pinned here independently — without this, editing
+  // the table (say, granting basic payments) would shift the matrix's
+  // expectations along with the behavior and every cell would stay green.
+  it("seeds exactly the frozen role→tool table", () => {
+    expect(ROLE_TOOLS).toEqual({
+      admin: ["model", "docs", "search", "payments"],
+      basic: ["model", "docs", "search"],
+    });
+  });
+
   // The frozen contract in one table: allow iff the role grants the tool and,
   // when a resource is named, the principal owns it.
   for (const role of ROLES) {
