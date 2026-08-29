@@ -1,3 +1,4 @@
+import { randomBytes } from "node:crypto";
 import { mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { z } from "zod";
@@ -49,6 +50,7 @@ const envSchema = z.object({
     .optional(),
   // Validated after parsing so a rejection never echoes the value.
   GATEWAY_JWT_SECRET: z.string().default(""),
+  GATEWAY_TOOL_CREDENTIAL: z.string().default(""),
   ARK_API_KEY: z.string().optional(),
   ARK_MODEL: z.string().optional(),
   ARK_BASE_URL: z
@@ -64,6 +66,9 @@ export type AppConfig = ReturnType<typeof loadConfig>;
 
 /** Short enough to type for a demo, long enough to be worth HMAC-signing with. */
 const MINIMUM_GATEWAY_JWT_SECRET_LENGTH = 16;
+
+/** The same bar for the tool credential: a guessable one guards nothing. */
+const MINIMUM_GATEWAY_TOOL_CREDENTIAL_LENGTH = 16;
 
 export function loadConfig(environment: NodeJS.ProcessEnv = process.env) {
   const env = envSchema.parse(environment);
@@ -92,6 +97,28 @@ export function loadConfig(environment: NodeJS.ProcessEnv = process.env) {
         "credential with it and refuses to start without one.",
     );
   }
+  // The mock tool service accepts nothing that does not carry this, so the
+  // gateway is the only way in. Unlike the signing secret it names nothing
+  // outside this process — both ends of the check are in it — so an unset value
+  // is minted per process rather than refused: a demo gets a strong credential
+  // with no manual step, and no placeholder is ever left standing. A value the
+  // operator *did* set is held to the same bar as the signing secret, and a
+  // rejection names the variable without repeating the value.
+  const configuredToolCredential = env.GATEWAY_TOOL_CREDENTIAL.trim();
+  if (
+    configuredToolCredential.length > 0 &&
+    (configuredToolCredential.length < MINIMUM_GATEWAY_TOOL_CREDENTIAL_LENGTH ||
+      configuredToolCredential.startsWith("replace-"))
+  ) {
+    throw new Error(
+      "GATEWAY_TOOL_CREDENTIAL must be at least " +
+        MINIMUM_GATEWAY_TOOL_CREDENTIAL_LENGTH +
+        " random characters when it is set. Leave it unset to have the server " +
+        "mint an ephemeral one for the process.",
+    );
+  }
+  const gatewayToolCredential =
+    configuredToolCredential || randomBytes(32).toString("base64url");
   const defaultContainerUser =
     typeof process.getuid === "function" && typeof process.getgid === "function"
       ? process.getuid() + ":" + process.getgid()
@@ -117,6 +144,7 @@ export function loadConfig(environment: NodeJS.ProcessEnv = process.env) {
     runtimeInstanceId: env.RUNTIME_INSTANCE_ID,
     authToken,
     gatewayJwtSecret,
+    gatewayToolCredential,
     arkApiKey: env.ARK_API_KEY?.trim() ?? "",
     arkModel: env.ARK_MODEL?.trim() ?? "",
     arkBaseUrl: env.ARK_BASE_URL.replace(/\/+$/, ""),
