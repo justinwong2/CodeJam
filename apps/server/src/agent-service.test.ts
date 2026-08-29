@@ -201,6 +201,36 @@ describe("Run sessions", () => {
     first.finish({ output: "done", threadId: "thread", usage: null });
   });
 
+  it("revokes every live session for one Agent and leaves others alone", async () => {
+    const { runner, requests, finish } = pendingRunner();
+    const service = await makeService(runner);
+    const target = await service.createAgent({ name: "Revoked" });
+    const bystander = await service.createAgent({ name: "Untouched" });
+    await service.sendMessage(target.id, "long task");
+    await service.sendMessage(bystander.id, "also long");
+    await expect.poll(() => requests.length).toBe(2);
+
+    expect(await service.revokeAgentSessions(target.id)).toEqual({
+      revokedSessions: 1,
+    });
+    expect(service.listRunSessions(target.id)[0]?.revoked).toBe(true);
+    expect(service.listRunSessions(bystander.id)[0]?.revoked).toBe(false);
+
+    // Revocation is idempotent: a second call finds nothing left to revoke.
+    expect(await service.revokeAgentSessions(target.id)).toEqual({
+      revokedSessions: 0,
+    });
+
+    finish({ output: "done", threadId: "thread", usage: null });
+  });
+
+  it("refuses to revoke sessions for an Agent that does not exist", async () => {
+    const service = await makeService();
+    await expect(
+      service.revokeAgentSessions("00000000-0000-4000-8000-000000000000"),
+    ).rejects.toMatchObject({ statusCode: 404 });
+  });
+
   it("drops the sessions of a deleted Agent", async () => {
     const service = await makeService();
     const agent = await service.createAgent({ name: "Doomed" });

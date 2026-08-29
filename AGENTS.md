@@ -34,6 +34,8 @@ Summary — canonical list is in [CLAUDE.md](CLAUDE.md#invariants-to-preserve).
 6. Codex thread continuity powers multi-turn conversations.
 7. Agent deletion archives the workspace; it does not destroy it.
 8. Middleware enforces server-side, never UI-only.
+9. The gateway fails closed: an unverifiable run credential is `401` and the
+   upstream is never called.
 
 ## Repo Map
 
@@ -47,16 +49,24 @@ Summary — canonical list is in [CLAUDE.md](CLAUDE.md#invariants-to-preserve).
 | `apps/server/src/codex-runner.ts`           | Codex as host process           |
 | `apps/server/src/container-codex-runner.ts` | Codex in disposable container   |
 | `apps/server/src/gateway.ts`                | Agent Access Gateway routes     |
+| `apps/server/src/run-jwt.ts`                | Per-run credential sign/verify  |
 | `apps/web/src/App.tsx`                      | Entire UI                       |
 | `docs/`                                     | Architecture, deployment, brief |
 
-Browser-facing routes live under `/api/*` behind the shared demo token. The
-agent-facing gateway is separate and deliberately outside that hook — agents
-authenticate with their own run credential:
+Browser-facing routes live under `/api/*` behind the shared demo token,
+including the operator's kill switch:
 
-| Method | Path                    | Purpose                                                     |
-| ------ | ----------------------- | ----------------------------------------------------------- |
-| POST   | `/gateway/v1/responses` | Model proxy: injects the Ark key, streams the reply through |
+| Method | Path                     | Purpose                                      |
+| ------ | ------------------------ | -------------------------------------------- |
+| POST   | `/api/agents/:id/revoke` | Revoke the Agent's live run sessions mid-run |
+
+The agent-facing gateway is separate and deliberately outside that hook —
+agents authenticate with their own per-run credential, which the control plane
+mints and can revoke:
+
+| Method | Path                    | Purpose                                                                               |
+| ------ | ----------------------- | ------------------------------------------------------------------------------------- |
+| POST   | `/gateway/v1/responses` | Model proxy: verifies the run session, injects the Ark key, streams the reply through |
 
 ## Extension Seams
 

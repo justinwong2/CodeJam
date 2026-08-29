@@ -114,6 +114,13 @@ export async function createApp(
     return { agent: await service.stopAgent(id) };
   });
 
+  // Under /api, so the browser hook guards it: revocation is an operator
+  // action, not something an Agent may perform on itself.
+  app.post("/api/agents/:id/revoke", async (request) => {
+    const { id } = agentIdParams.parse(request.params);
+    return service.revokeAgentSessions(id);
+  });
+
   app.get("/api/agents/:id/messages", async (request) => {
     const { id } = agentIdParams.parse(request.params);
     return { messages: service.getMessages(id) };

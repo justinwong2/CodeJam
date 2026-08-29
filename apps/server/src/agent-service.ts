@@ -308,6 +308,33 @@ export class AgentService implements RunSessionDirectory {
     );
   }
 
+  /**
+   * The mid-run kill: every live credential this Agent holds stops working on
+   * its next gateway call. The Run itself is left to finish or fail on its own
+   * — revoking access is not the same as stopping the Agent, and the operator
+   * can still see what it did.
+   */
+  async revokeAgentSessions(agentId: string): Promise<{
+    revokedSessions: number;
+  }> {
+    this.getAgent(agentId);
+    return this.store.mutate((database) => {
+      const at = now();
+      let revokedSessions = 0;
+      for (const session of database.sessions) {
+        if (
+          session.agentId === agentId &&
+          !session.revoked &&
+          session.expiresAt > at
+        ) {
+          session.revoked = true;
+          revokedSessions += 1;
+        }
+      }
+      return { revokedSessions };
+    });
+  }
+
   listRunSessions(agentId: string): RunSession[] {
     return this.store.select((database) =>
       database.sessions.filter((session) => session.agentId === agentId),

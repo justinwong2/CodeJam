@@ -1,11 +1,16 @@
+import { mkdtemp, rm } from "node:fs/promises";
 import { createServer, type IncomingMessage, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
+import { tmpdir } from "node:os";
+import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
+import { AgentService } from "./agent-service.js";
 import { createApp } from "./app.js";
 import { loadConfig } from "./config.js";
 import { signRunJwt, type RunJwtClaims } from "./run-jwt.js";
-import type { AgentService } from "./agent-service.js";
-import type { RunSession } from "./types.js";
+import { JsonStore } from "./store.js";
+import type { RunnerRequest, RunnerResult, RunSession } from "./types.js";
+import { WorkspaceManager } from "./workspace.js";
 
 const ARK_KEY = "gateway-test-upstream-key";
 const GATEWAY_SECRET = "gateway-test-signing-secret";
@@ -31,6 +36,34 @@ function serviceWith(...sessions: RunSession[]): AgentService {
     findRunSession: (jwtId: string) =>
       sessions.find((session) => session.jwtId === jwtId),
   } as unknown as AgentService;
+}
+
+const temporaryDirectories: string[] = [];
+
+/** A real service over a temporary store, for the end-to-end revocation path. */
+async function realService(
+  arkBaseUrl: string,
+  runner: {
+    run: (request: RunnerRequest) => Promise<RunnerResult>;
+    cancel: () => Promise<boolean>;
+    isAvailable: () => Promise<boolean>;
+  },
+): Promise<{ service: AgentService; config: ReturnType<typeof loadConfig> }> {
+  const root = await mkdtemp(path.join(tmpdir(), "launchpad-gateway-test-"));
+  temporaryDirectories.push(root);
+  const config = configFor(arkBaseUrl, {
+    APP_DATA_DIR: path.join(root, "data"),
+    AGENT_WORKSPACE_ROOT: path.join(root, "workspaces"),
+    CODEX_HOME: path.join(root, "codex"),
+  });
+  const service = new AgentService(
+    config,
+    new JsonStore(path.join(root, "data", "db.json")),
+    new WorkspaceManager(path.join(root, "workspaces")),
+    runner,
+  );
+  await service.initialize();
+  return { service, config };
 }
 
 function credentialFor(
@@ -422,5 +455,119 @@ describe("Model gateway authentication", () => {
         agentId: "another-agent",
       })}`,
     });
+  });
+});
+
+describe("Mid-run revocation", () => {
+  afterEach(async () => {
+    await closeOpenServers();
+    await Promise.all(
+      temporaryDirectories
+        .splice(0)
+        .map((directory) => rm(directory, { recursive: true, force: true })),
+    );
+  });
+
+  it("stops an Agent's next model call while its run is still going", async () => {
+    const upstream = await startEchoUpstream();
+    const requests: RunnerRequest[] = [];
+    let finish!: (result: RunnerResult) => void;
+    const pending = new Promise<RunnerResult>((resolve) => {
+      finish = resolve;
+    });
+    const { service } = await realService(upstream.baseUrl, {
+      run: (request) => {
+        requests.push(request);
+        return pending;
+      },
+      cancel: async () => false,
+      isAvailable: async () => true,
+    });
+    const app = await createApp(
+      loadConfig({
+        NODE_ENV: "test",
+        GATEWAY_JWT_SECRET: GATEWAY_SECRET,
+        ARK_API_KEY: ARK_KEY,
+        ARK_MODEL: "ep-test",
+        ARK_BASE_URL: upstream.baseUrl,
+      }),
+      service,
+    );
+
+    const created = await app.inject({
+      method: "POST",
+      url: "/api/agents",
+      payload: { name: "Runaway" },
+    });
+    expect(created.statusCode).toBe(201);
+    const agentId = (created.json() as { agent: { id: string } }).agent.id;
+
+    const started = await app.inject({
+      method: "POST",
+      url: `/api/agents/${agentId}/messages`,
+      payload: { content: "keep calling the model" },
+    });
+    expect(started.statusCode).toBe(202);
+    await expect.poll(() => requests.length).toBe(1);
+    const runJwt = requests[0]?.runJwt ?? "";
+
+    // The credential works while the run is supervised.
+    const beforeRevocation = await app.inject({
+      method: "POST",
+      url: "/gateway/v1/responses",
+      headers: {
+        "content-type": "application/json",
+        authorization: `Bearer ${runJwt}`,
+      },
+      payload: '{"model":"ep-test"}',
+    });
+    expect(beforeRevocation.statusCode).toBe(200);
+    expect(upstream.calls).toHaveLength(1);
+
+    const revoked = await app.inject({
+      method: "POST",
+      url: `/api/agents/${agentId}/revoke`,
+    });
+    expect(revoked.statusCode).toBe(200);
+    expect(revoked.json()).toEqual({ revokedSessions: 1 });
+
+    // Same token, same run, now worthless — and Ark is not called again.
+    const afterRevocation = await app.inject({
+      method: "POST",
+      url: "/gateway/v1/responses",
+      headers: {
+        "content-type": "application/json",
+        authorization: `Bearer ${runJwt}`,
+      },
+      payload: '{"model":"ep-test"}',
+    });
+    expect(afterRevocation.statusCode).toBe(401);
+    expect(upstream.calls).toHaveLength(1);
+
+    finish({ output: "done", threadId: "thread", usage: null });
+    await expect
+      .poll(
+        () =>
+          service.getRun((started.json() as { run: { id: string } }).run.id)
+            .status,
+      )
+      .toBe("completed");
+    await app.close();
+  });
+
+  it("answers 404 for an Agent that does not exist", async () => {
+    const upstream = await startEchoUpstream();
+    const { service } = await realService(upstream.baseUrl, {
+      run: async () => ({ output: "done", threadId: null, usage: null }),
+      cancel: async () => false,
+      isAvailable: async () => true,
+    });
+    const app = await createApp(configFor(upstream.baseUrl), service);
+    const response = await app.inject({
+      method: "POST",
+      url: "/api/agents/00000000-0000-4000-8000-000000000000/revoke",
+    });
+    expect(response.statusCode).toBe(404);
+    await app.close();
   });
 });
