@@ -3,8 +3,47 @@ export type RunStatus =
   "queued" | "running" | "completed" | "failed" | "cancelled";
 export type MessageRole = "user" | "assistant";
 
+/** Seeded, prebuilt roles. Custom-role authoring is deliberately out of scope. */
+export type Role = "admin" | "basic";
+
+/** Everything the gateway can be asked to reach on an Agent's behalf. */
+export type ToolName = "model" | "docs" | "search" | "payments";
+
+export interface User {
+  id: string;
+  name: string;
+  role: Role;
+}
+
+/**
+ * Role → permitted tools. Server-side only: permissions are resolved from the
+ * owner on every call, never carried in a run credential, so a role change or
+ * a revocation takes effect on the agent's next call instead of at expiry.
+ */
+export const ROLE_TOOLS: Record<Role, ToolName[]> = {
+  admin: ["model", "docs", "search", "payments"],
+  basic: ["model", "docs", "search"],
+};
+
+/**
+ * Who a gateway call is acting as. The human owner is the ownership key: an
+ * Agent never has authority of its own, only the authority of the human it
+ * runs for.
+ */
+export interface Principal {
+  /** The acting human. */
+  humanId: string;
+  /** `== humanId`; the key ownership comparisons are made against. */
+  ownerId: string;
+  agentId: string;
+  runId: string;
+  /** Resolved server-side from the owner, not read from the credential. */
+  role: Role;
+}
+
 export interface Agent {
   id: string;
+  ownerId: string;
   name: string;
   description: string;
   instructions: string;
@@ -45,9 +84,8 @@ export interface AgentRun {
 }
 
 /**
- * The owner every Agent and run session is attributed to until real users
- * exist. Slice 3 seeds users and stamps `ownerId` from the acting human; this
- * constant is the single place that assumption lives until then.
+ * The owner an Agent falls back to: the acting human when no user was named,
+ * and the owner backfilled onto Agents stored before ownership existed.
  */
 export const DEFAULT_OWNER_ID = "user-a";
 
@@ -73,6 +111,7 @@ export interface Database {
   messages: Message[];
   runs: AgentRun[];
   sessions: RunSession[];
+  users: User[];
 }
 
 export interface CreateAgentInput {

@@ -2,7 +2,8 @@ import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { DATABASE_VERSION, JsonStore } from "./store.js";
+import { DATABASE_VERSION, JsonStore, SEED_USERS } from "./store.js";
+import { DEFAULT_OWNER_ID } from "./types.js";
 
 const temporaryDirectories: string[] = [];
 
@@ -98,6 +99,7 @@ describe("JsonStore migration", () => {
       messages: [],
       runs: [],
       sessions: [],
+      users: SEED_USERS,
     });
   });
 
@@ -113,6 +115,85 @@ describe("JsonStore migration", () => {
     await expect(store.initialize()).rejects.toThrow(
       /Unsupported database format/,
     );
+  });
+});
+
+describe("Seeded users and ownership", () => {
+  it("seeds the demo users once, not once per start", async () => {
+    const filePath = await temporaryFile();
+    const store = new JsonStore(filePath);
+    await store.initialize();
+    expect(store.snapshot().users).toEqual([
+      { id: "user-a", name: "User A", role: "admin" },
+      { id: "user-b", name: "User B", role: "basic" },
+    ]);
+
+    // A restart reads the seeded rows back rather than seeding beside them.
+    const restarted = new JsonStore(filePath);
+    await restarted.initialize();
+    expect(restarted.snapshot().users.map((user) => user.id)).toEqual([
+      "user-a",
+      "user-b",
+    ]);
+  });
+
+  it("keeps an edited seeded user instead of re-seeding over it", async () => {
+    const filePath = await temporaryFile();
+    await writeFile(
+      filePath,
+      JSON.stringify({
+        version: DATABASE_VERSION,
+        users: [{ id: "user-b", name: "Renamed B", role: "basic" }],
+      }),
+      "utf8",
+    );
+
+    const store = new JsonStore(filePath);
+    await store.initialize();
+
+    // The missing seed is added; the stored one is left exactly as it was.
+    expect(store.snapshot().users).toEqual([
+      { id: "user-b", name: "Renamed B", role: "basic" },
+      { id: "user-a", name: "User A", role: "admin" },
+    ]);
+  });
+
+  it("gives an Agent stored before ownership existed the default owner", async () => {
+    const filePath = await temporaryFile();
+    await writeFile(
+      filePath,
+      JSON.stringify({ version: 1, agents: [legacyAgent] }),
+      "utf8",
+    );
+
+    const store = new JsonStore(filePath);
+    await store.initialize();
+    expect(store.snapshot().agents[0]?.ownerId).toBe(DEFAULT_OWNER_ID);
+
+    // The backfill is durable: it survives the write-back and a reopen.
+    const reopened = new JsonStore(filePath);
+    await reopened.initialize();
+    expect(reopened.snapshot().agents[0]).toMatchObject({
+      id: "agent-1",
+      name: "Legacy",
+      ownerId: DEFAULT_OWNER_ID,
+    });
+  });
+
+  it("leaves an Agent that already has an owner alone", async () => {
+    const filePath = await temporaryFile();
+    await writeFile(
+      filePath,
+      JSON.stringify({
+        version: DATABASE_VERSION,
+        agents: [{ ...legacyAgent, ownerId: "user-b" }],
+      }),
+      "utf8",
+    );
+
+    const store = new JsonStore(filePath);
+    await store.initialize();
+    expect(store.snapshot().agents[0]?.ownerId).toBe("user-b");
   });
 });
 

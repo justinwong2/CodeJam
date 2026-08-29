@@ -1,15 +1,27 @@
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import path from "node:path";
+import { DEFAULT_OWNER_ID } from "./types.js";
 import type {
   Agent,
   AgentRun,
   Database,
   Message,
   RunSession,
+  User,
 } from "./types.js";
 
 /** Bumped when a stored file must be reshaped, not when it merely grows. */
 export const DATABASE_VERSION = 2;
+
+/**
+ * The demo's humans. Authentication is mocked by design — what the gateway
+ * scores is authorization — so the two roles ship as fixtures rather than
+ * something an operator creates.
+ */
+export const SEED_USERS: User[] = [
+  { id: DEFAULT_OWNER_ID, name: "User A", role: "admin" },
+  { id: "user-b", name: "User B", role: "basic" },
+];
 
 const emptyDatabase = (): Database => ({
   version: DATABASE_VERSION,
@@ -17,10 +29,35 @@ const emptyDatabase = (): Database => ({
   messages: [],
   runs: [],
   sessions: [],
+  users: structuredClone(SEED_USERS),
 });
 
 const collection = <T>(value: unknown): T[] =>
   Array.isArray(value) ? (value as T[]) : [];
+
+/**
+ * Adds any seeded user the file does not already carry. Seeding by id rather
+ * than by "is the collection empty" is what keeps a restart from stacking a
+ * second copy of every user beside the first.
+ */
+function seedUsers(stored: User[]): User[] {
+  const present = new Set(stored.map((user) => user.id));
+  return [
+    ...stored,
+    ...SEED_USERS.filter((user) => !present.has(user.id)).map((user) => ({
+      ...user,
+    })),
+  ];
+}
+
+/** Agents stored before ownership existed belong to the default owner. */
+function withOwners(agents: Agent[]): Agent[] {
+  return agents.map((agent) =>
+    typeof agent.ownerId === "string" && agent.ownerId.length > 0
+      ? agent
+      : { ...agent, ownerId: DEFAULT_OWNER_ID },
+  );
+}
 
 /**
  * Tolerant loader. An older file keeps its rows and gains the collections it
@@ -42,10 +79,11 @@ export function migrateDatabase(parsed: unknown): Database {
   }
   return {
     version: DATABASE_VERSION,
-    agents: collection<Agent>(source.agents),
+    agents: withOwners(collection<Agent>(source.agents)),
     messages: collection<Message>(source.messages),
     runs: collection<AgentRun>(source.runs),
     sessions: collection<RunSession>(source.sessions),
+    users: seedUsers(collection<User>(source.users)),
   };
 }
 

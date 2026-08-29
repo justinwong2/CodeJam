@@ -97,11 +97,20 @@ export class AgentService implements RunSessionDirectory {
     return agent;
   }
 
-  async createAgent(input: CreateAgentInput): Promise<Agent> {
+  /**
+   * `ownerId` is the acting human, resolved at the request boundary. It
+   * defaults so a caller with no user context (a script, a test) still
+   * produces an owned Agent rather than an unowned one.
+   */
+  async createAgent(
+    input: CreateAgentInput,
+    ownerId: string = DEFAULT_OWNER_ID,
+  ): Promise<Agent> {
     const timestamp = now();
     const id = randomUUID();
     const agent: Agent = {
       id,
+      ownerId,
       name: input.name.trim(),
       description: input.description?.trim() ?? "",
       instructions: input.instructions?.trim() ?? "",
