@@ -1,7 +1,7 @@
 # ADR: Agent Access Gateway
 
 - **Date:** 2026-08-27
-- **Status:** Proposed
+- **Status:** Accepted
 - **Deciders:** Team (hackathon)
 
 ## Context

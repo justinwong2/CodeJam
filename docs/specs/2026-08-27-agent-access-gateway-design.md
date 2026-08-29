@@ -1,7 +1,7 @@
 # Agent Access Gateway Design
 
 - **Date:** 2026-08-27
-- **Status:** Draft
+- **Status:** Approved
 - **Scope:** Full-stack (control plane + Runtime integration + data + minimal frontend)
 - **Related ADR:** [../adr/2026-08-27-agent-access-gateway.md](../adr/2026-08-27-agent-access-gateway.md)
 

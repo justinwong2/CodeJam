@@ -30,4 +30,4 @@ Copy [TEMPLATE.md](TEMPLATE.md) to start a new spec.
 
 | Date       | Spec                                                                     | Status |
 | ---------- | ------------------------------------------------------------------------ | ------ |
-| 2026-08-27 | [Agent Access Gateway Design](2026-08-27-agent-access-gateway-design.md) | Draft  |
+| 2026-08-27 | [Agent Access Gateway Design](2026-08-27-agent-access-gateway-design.md) | Approved |
