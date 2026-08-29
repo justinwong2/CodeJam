@@ -44,11 +44,35 @@ export interface AgentRun {
   createdAt: string;
 }
 
+/**
+ * The owner every Agent and run session is attributed to until real users
+ * exist. Slice 3 seeds users and stamps `ownerId` from the acting human; this
+ * constant is the single place that assumption lives until then.
+ */
+export const DEFAULT_OWNER_ID = "user-a";
+
+/**
+ * The server-side half of a per-run credential. The JWT handed to the Runtime
+ * is only honoured while a matching session is live, so revoking or expiring
+ * the session denies the agent's next call without reaching into the Runtime.
+ */
+export interface RunSession {
+  runId: string;
+  agentId: string;
+  ownerId: string;
+  /** The token's `jti`; the gateway looks a session up by it. */
+  jwtId: string;
+  revoked: boolean;
+  createdAt: string;
+  expiresAt: string;
+}
+
 export interface Database {
-  version: 1;
+  version: 2;
   agents: Agent[];
   messages: Message[];
   runs: AgentRun[];
+  sessions: RunSession[];
 }
 
 export interface CreateAgentInput {
