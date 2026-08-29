@@ -3,15 +3,63 @@ import type { AddressInfo } from "node:net";
 import { afterEach, describe, expect, it } from "vitest";
 import { createApp } from "./app.js";
 import { loadConfig } from "./config.js";
+import { signRunJwt, type RunJwtClaims } from "./run-jwt.js";
 import type { AgentService } from "./agent-service.js";
-
-const service = {
-  listAgents: () => [],
-  systemInfo: async () => ({}),
-} as unknown as AgentService;
+import type { RunSession } from "./types.js";
 
 const ARK_KEY = "gateway-test-upstream-key";
-const RUN_JWT = "run-jwt-from-the-agent";
+const GATEWAY_SECRET = "gateway-test-signing-secret";
+
+function liveSession(overrides: Partial<RunSession> = {}): RunSession {
+  return {
+    runId: "run-1",
+    agentId: "agent-1",
+    ownerId: "user-a",
+    jwtId: "session-1",
+    revoked: false,
+    createdAt: new Date(Date.now() - 1_000).toISOString(),
+    expiresAt: new Date(Date.now() + 600_000).toISOString(),
+    ...overrides,
+  };
+}
+
+/** The control-plane half of the credential: only these sessions are live. */
+function serviceWith(...sessions: RunSession[]): AgentService {
+  return {
+    listAgents: () => [],
+    systemInfo: async () => ({}),
+    findRunSession: (jwtId: string) =>
+      sessions.find((session) => session.jwtId === jwtId),
+  } as unknown as AgentService;
+}
+
+function credentialFor(
+  session: RunSession,
+  overrides: Partial<RunJwtClaims> = {},
+): string {
+  return signRunJwt(GATEWAY_SECRET, {
+    jti: session.jwtId,
+    agentId: session.agentId,
+    ownerId: session.ownerId,
+    runId: session.runId,
+    exp: Math.floor(Date.parse(session.expiresAt) / 1_000),
+    ...overrides,
+  });
+}
+
+function configFor(
+  arkBaseUrl: string,
+  extra: Record<string, string> = {},
+): ReturnType<typeof loadConfig> {
+  return loadConfig({
+    NODE_ENV: "test",
+    GATEWAY_JWT_SECRET: GATEWAY_SECRET,
+    ARK_API_KEY: ARK_KEY,
+    ARK_MODEL: "ep-test",
+    ARK_BASE_URL: arkBaseUrl,
+    ...extra,
+  });
+}
 
 interface UpstreamCall {
   method: string;
@@ -62,39 +110,41 @@ async function startUpstream(
   return { baseUrl: `http://127.0.0.1:${port}`, calls };
 }
 
-describe("Model gateway", () => {
-  afterEach(async () => {
-    while (openServers.length > 0) {
-      const server = openServers.pop();
-      if (!server) continue;
-      await new Promise<void>((resolve) => server.close(() => resolve()));
-    }
+async function startEchoUpstream(): Promise<Upstream> {
+  return startUpstream((_call, response) => {
+    response.writeHead(200, { "content-type": "application/json" });
+    response.end(JSON.stringify({ id: "resp_1", status: "completed" }));
   });
+}
+
+async function closeOpenServers(): Promise<void> {
+  while (openServers.length > 0) {
+    const server = openServers.pop();
+    if (!server) continue;
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+  }
+}
+
+describe("Model gateway", () => {
+  afterEach(closeOpenServers);
 
   it("swaps the agent token for the upstream key and forwards the body byte-for-byte", async () => {
-    const upstream = await startUpstream((_call, response) => {
-      response.writeHead(200, { "content-type": "application/json" });
-      response.end(JSON.stringify({ id: "resp_1", status: "completed" }));
-    });
+    const upstream = await startEchoUpstream();
+    const session = liveSession();
     const app = await createApp(
-      loadConfig({
-        NODE_ENV: "test",
-        GATEWAY_JWT_SECRET: "gateway-test-signing-secret",
-        ARK_API_KEY: ARK_KEY,
-        ARK_MODEL: "ep-test",
-        ARK_BASE_URL: upstream.baseUrl,
-      }),
-      service,
+      configFor(upstream.baseUrl),
+      serviceWith(session),
     );
 
     // Deliberately awkward payload: unicode, doubled spaces, trailing newline.
     const payload = '{"model":"ep-test","input":"héllo  wörld"}\n';
+    const runJwt = credentialFor(session);
     const response = await app.inject({
       method: "POST",
       url: "/gateway/v1/responses",
       headers: {
         "content-type": "application/json",
-        authorization: `Bearer ${RUN_JWT}`,
+        authorization: `Bearer ${runJwt}`,
       },
       payload,
     });
@@ -106,26 +156,18 @@ describe("Model gateway", () => {
     expect(call?.method).toBe("POST");
     expect(call?.url).toBe("/responses");
     expect(call?.authorization).toBe(`Bearer ${ARK_KEY}`);
-    expect(call?.authorization).not.toContain(RUN_JWT);
+    expect(call?.authorization).not.toContain(runJwt);
     expect(call?.contentType).toBe("application/json");
     expect(call?.body).toBe(payload);
     await app.close();
   });
 
   it("accepts a body far larger than the app-level limit", async () => {
-    const upstream = await startUpstream((_call, response) => {
-      response.writeHead(200, { "content-type": "application/json" });
-      response.end("{}");
-    });
+    const upstream = await startEchoUpstream();
+    const session = liveSession();
     const app = await createApp(
-      loadConfig({
-        NODE_ENV: "test",
-        GATEWAY_JWT_SECRET: "gateway-test-signing-secret",
-        ARK_API_KEY: ARK_KEY,
-        ARK_MODEL: "ep-test",
-        ARK_BASE_URL: upstream.baseUrl,
-      }),
-      service,
+      configFor(upstream.baseUrl),
+      serviceWith(session),
     );
 
     // The app-level limit is 1 MiB; a real turn's context easily exceeds it.
@@ -133,7 +175,10 @@ describe("Model gateway", () => {
     const response = await app.inject({
       method: "POST",
       url: "/gateway/v1/responses",
-      headers: { "content-type": "application/json" },
+      headers: {
+        "content-type": "application/json",
+        authorization: `Bearer ${credentialFor(session)}`,
+      },
       payload,
     });
 
@@ -143,27 +188,22 @@ describe("Model gateway", () => {
   });
 
   it("stays outside the browser token hook, which guards /api only", async () => {
-    const upstream = await startUpstream((_call, response) => {
-      response.writeHead(200, { "content-type": "application/json" });
-      response.end("{}");
-    });
+    const upstream = await startEchoUpstream();
+    const session = liveSession();
     const app = await createApp(
-      loadConfig({
-        NODE_ENV: "test",
-        GATEWAY_JWT_SECRET: "gateway-test-signing-secret",
-        APP_AUTH_TOKEN: "a-strong-test-token",
-        ARK_API_KEY: ARK_KEY,
-        ARK_MODEL: "ep-test",
-        ARK_BASE_URL: upstream.baseUrl,
-      }),
-      service,
+      configFor(upstream.baseUrl, { APP_AUTH_TOKEN: "a-strong-test-token" }),
+      serviceWith(session),
     );
 
-    // The agent is a different principal: it never holds the browser's token.
+    // The agent is a different principal: it holds a run credential and never
+    // the browser's shared token.
     const response = await app.inject({
       method: "POST",
       url: "/gateway/v1/responses",
-      headers: { "content-type": "application/json" },
+      headers: {
+        "content-type": "application/json",
+        authorization: `Bearer ${credentialFor(session)}`,
+      },
       payload: "{}",
     });
     expect(response.statusCode).toBe(200);
@@ -185,21 +225,19 @@ describe("Model gateway", () => {
     const { port } = placeholder.address() as AddressInfo;
     await new Promise<void>((resolve) => placeholder.close(() => resolve()));
 
+    const session = liveSession();
     const app = await createApp(
-      loadConfig({
-        NODE_ENV: "test",
-        GATEWAY_JWT_SECRET: "gateway-test-signing-secret",
-        ARK_API_KEY: ARK_KEY,
-        ARK_MODEL: "ep-test",
-        ARK_BASE_URL: `http://127.0.0.1:${port}`,
-      }),
-      service,
+      configFor(`http://127.0.0.1:${port}`),
+      serviceWith(session),
     );
 
     const response = await app.inject({
       method: "POST",
       url: "/gateway/v1/responses",
-      headers: { "content-type": "application/json" },
+      headers: {
+        "content-type": "application/json",
+        authorization: `Bearer ${credentialFor(session)}`,
+      },
       payload: "{}",
     });
 
@@ -234,15 +272,10 @@ describe("Model gateway", () => {
       response.end("event: done\ndata: [DONE]\n\n");
     });
 
+    const session = liveSession();
     const app = await createApp(
-      loadConfig({
-        NODE_ENV: "test",
-        GATEWAY_JWT_SECRET: "gateway-test-signing-secret",
-        ARK_API_KEY: ARK_KEY,
-        ARK_MODEL: "ep-test",
-        ARK_BASE_URL: upstream.baseUrl,
-      }),
-      service,
+      configFor(upstream.baseUrl),
+      serviceWith(session),
     );
     await app.listen({ host: "127.0.0.1", port: 0 });
     const address = app.server.address() as AddressInfo;
@@ -253,7 +286,7 @@ describe("Model gateway", () => {
         method: "POST",
         headers: {
           "content-type": "application/json",
-          authorization: `Bearer ${RUN_JWT}`,
+          authorization: `Bearer ${credentialFor(session)}`,
         },
         body: JSON.stringify({ model: "ep-test", stream: true }),
       },
@@ -280,5 +313,114 @@ describe("Model gateway", () => {
     expect(body).toContain('event: chunk\ndata: {"delta":"two"}\n\n');
     expect(body).toContain("event: done\ndata: [DONE]\n\n");
     await app.close();
+  });
+});
+
+describe("Model gateway authentication", () => {
+  afterEach(closeOpenServers);
+
+  /**
+   * Every rejection is proven twice: the caller is denied *and* the upstream
+   * was never asked. A gateway that forwarded first and denied afterwards
+   * would already have spent the Ark key.
+   */
+  async function expectDenied(
+    session: RunSession | null,
+    headers: Record<string, string>,
+  ): Promise<void> {
+    const upstream = await startEchoUpstream();
+    const app = await createApp(
+      configFor(upstream.baseUrl),
+      session ? serviceWith(session) : serviceWith(),
+    );
+    const response = await app.inject({
+      method: "POST",
+      url: "/gateway/v1/responses",
+      headers: { "content-type": "application/json", ...headers },
+      payload: '{"model":"ep-test"}',
+    });
+    expect(response.statusCode).toBe(401);
+    expect(upstream.calls).toHaveLength(0);
+    expect(response.body).not.toContain(ARK_KEY);
+    expect(response.body).not.toContain(GATEWAY_SECRET);
+    await app.close();
+  }
+
+  it("denies a request carrying no credential at all", async () => {
+    await expectDenied(liveSession(), {});
+  });
+
+  it("denies a credential that is not a bearer token", async () => {
+    const session = liveSession();
+    await expectDenied(session, {
+      authorization: `Basic ${credentialFor(session)}`,
+    });
+  });
+
+  it("denies a tampered signature", async () => {
+    const session = liveSession();
+    const [header, claims] = credentialFor(session).split(".");
+    await expectDenied(session, {
+      authorization: `Bearer ${header}.${claims}.forged-signature`,
+    });
+  });
+
+  it("denies a credential signed with another key", async () => {
+    const session = liveSession();
+    const forged = signRunJwt("a-different-signing-secret", {
+      jti: session.jwtId,
+      agentId: session.agentId,
+      ownerId: session.ownerId,
+      runId: session.runId,
+      exp: Math.floor(Date.now() / 1_000) + 600,
+    });
+    await expectDenied(session, { authorization: `Bearer ${forged}` });
+  });
+
+  it("denies an expired credential even when its session is still live", async () => {
+    const session = liveSession();
+    await expectDenied(session, {
+      authorization: `Bearer ${credentialFor(session, {
+        exp: Math.floor(Date.now() / 1_000) - 5,
+      })}`,
+    });
+  });
+
+  it("denies a credential whose session was never issued", async () => {
+    // Correctly signed, unexpired, and unknown: minting is the control plane's
+    // job, so a token the store cannot vouch for is worth nothing.
+    const orphan = liveSession({ jwtId: "session-that-was-never-stored" });
+    await expectDenied(null, {
+      authorization: `Bearer ${credentialFor(orphan)}`,
+    });
+  });
+
+  it("denies a revoked session mid-run", async () => {
+    const session = liveSession({ revoked: true });
+    await expectDenied(session, {
+      authorization: `Bearer ${credentialFor(session)}`,
+    });
+  });
+
+  it("denies a session that has already expired, whatever the token claims", async () => {
+    // Run completion expires the session in place. The token still sitting in
+    // the Runtime looks valid, and must stop working anyway.
+    const session = liveSession({
+      expiresAt: new Date(Date.now() - 1_000).toISOString(),
+    });
+    await expectDenied(session, {
+      authorization: `Bearer ${credentialFor(session, {
+        exp: Math.floor(Date.now() / 1_000) + 600,
+      })}`,
+    });
+  });
+
+  it("denies a credential whose claims disagree with its session", async () => {
+    const session = liveSession();
+    await expectDenied(session, {
+      authorization: `Bearer ${credentialFor(session, {
+        agentId: "another-agent",
+      })}`,
+    });
   });
 });

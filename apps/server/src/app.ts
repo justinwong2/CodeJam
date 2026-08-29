@@ -68,8 +68,8 @@ export async function createApp(
 
   // Agent-facing routes. The onRequest hook above guards /api/* only, so the
   // gateway is deliberately outside APP_AUTH_TOKEN: agents authenticate with
-  // their own per-run credential, not the browser's shared demo token.
-  await registerGateway(app, config);
+  // their own per-run credential, which the service mints and can revoke.
+  await registerGateway(app, config, service);
 
   app.get("/api/health", async () => ({
     ok: true,

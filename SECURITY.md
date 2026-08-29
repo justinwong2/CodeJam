@@ -21,12 +21,18 @@ credentials, personal data, or exploit details in an issue.
   Agent Runtime, so a prompt that asks an Agent to print `ARK_API_KEY` finds
   nothing to print. Codex reaches the model through the Agent Access Gateway
   (`POST /gateway/v1/responses`), which attaches the key on the way upstream.
-- **Branch-only exposure:** the gateway does not yet verify the run credential
-  it receives, and `/gateway/*` is outside the `APP_AUTH_TOKEN` hook by design.
-  Until per-run JWT verification lands, anyone who can reach the server's port
-  can spend the Ark key. `npm run poc` binds all interfaces (the Runtime
-  container cannot reach a loopback-only bind), so keep the POC on a trusted
-  network until that check exists.
+- The gateway verifies a per-run credential before forwarding anything: a
+  missing, forged, expired, or revoked token is answered with `401` and the
+  upstream is never called. `/gateway/*` stays outside the `APP_AUTH_TOKEN`
+  hook by design — agents authenticate as themselves, not as the browser
+  operator. `GATEWAY_JWT_SECRET` signs those credentials, never leaves the
+  server process, and is required at startup.
+- Run credentials are bearer tokens carried over plain HTTP between the Runtime
+  container and the host gateway. They are per-run, revocable, and expire with
+  the turn, but anyone who can read that local traffic during a run can replay
+  one until it expires or is revoked. `npm run poc` binds all interfaces (the
+  Runtime container cannot reach a loopback-only bind), so keep the POC on a
+  trusted network.
 - Ark key stored in Terraform POC state
 
 ## Safe use

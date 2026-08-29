@@ -2,11 +2,13 @@ import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { once } from "node:events";
 import { PassThrough } from "node:stream";
 import type { AppConfig } from "./config.js";
+import { verifyRunJwt } from "./run-jwt.js";
+import type { RunSession, RunSessionDirectory } from "./types.js";
 
 // The gateway is the machine-facing half of the control plane: Codex talks to
 // it instead of to Ark, so the upstream credential lives here and never inside
-// the Agent Runtime. Slice 1 verifies nothing yet -- the per-run JWT check
-// lands with the session model.
+// the Agent Runtime. Every call is authenticated against the run session that
+// issued its credential before anything is forwarded.
 export const GATEWAY_PREFIX = "/gateway/v1";
 
 // The environment variable Codex reads its gateway credential from. It replaces
@@ -73,11 +75,74 @@ function upstreamHeaders(request: FastifyRequest, apiKey: string): Headers {
   return headers;
 }
 
+type Authentication =
+  | { authenticated: true; session: RunSession }
+  | { authenticated: false; reason: string };
+
+/**
+ * Fail-closed authentication for an agent call. Both halves of the credential
+ * must hold: the token must be ours and unexpired, and the session it names
+ * must still be live. Revoking or expiring the session is therefore enough to
+ * stop an agent mid-run, without reaching into a running container.
+ *
+ * Reasons are drawn from this fixed set. They name what failed and never carry
+ * the signing secret, the token, or the upstream key.
+ */
+function authenticate(
+  config: AppConfig,
+  sessions: RunSessionDirectory,
+  request: FastifyRequest,
+): Authentication {
+  const header = request.headers.authorization ?? "";
+  if (!header.startsWith("Bearer ")) {
+    return { authenticated: false, reason: "Missing run credential" };
+  }
+  const verified = verifyRunJwt(
+    config.gatewayJwtSecret,
+    header.slice(7).trim(),
+  );
+  if (!verified.valid) {
+    return { authenticated: false, reason: verified.reason };
+  }
+
+  const session = sessions.findRunSession(verified.claims.jti);
+  if (!session) {
+    return { authenticated: false, reason: "Unknown run session" };
+  }
+  if (session.revoked) {
+    return { authenticated: false, reason: "Run session revoked" };
+  }
+  if (Date.parse(session.expiresAt) <= Date.now()) {
+    return { authenticated: false, reason: "Run session expired" };
+  }
+  // A signed token that names a different run than its session would mean the
+  // two halves disagree about who is calling. Nothing legitimate produces it.
+  if (
+    session.runId !== verified.claims.runId ||
+    session.agentId !== verified.claims.agentId
+  ) {
+    return { authenticated: false, reason: "Run credential does not match" };
+  }
+  return { authenticated: true, session };
+}
+
 async function proxyResponses(
   config: AppConfig,
+  sessions: RunSessionDirectory,
   request: FastifyRequest,
   reply: FastifyReply,
 ): Promise<FastifyReply> {
+  const authentication = authenticate(config, sessions, request);
+  if (!authentication.authenticated) {
+    // Logged without the token, and answered before the upstream is touched:
+    // a rejected call never spends the Ark key.
+    request.log.warn(
+      { reason: authentication.reason },
+      "Gateway rejected an agent call",
+    );
+    return reply.code(401).send({ error: authentication.reason });
+  }
+
   const body = request.body;
   let upstream: Response;
   try {
@@ -130,6 +195,7 @@ async function pump(
 export async function registerGateway(
   app: FastifyInstance,
   config: AppConfig,
+  sessions: RunSessionDirectory,
 ): Promise<void> {
   await app.register(
     async (scope) => {
@@ -146,7 +212,8 @@ export async function registerGateway(
       scope.post(
         "/responses",
         { bodyLimit: GATEWAY_BODY_LIMIT },
-        async (request, reply) => proxyResponses(config, request, reply),
+        async (request, reply) =>
+          proxyResponses(config, sessions, request, reply),
       );
     },
     { prefix: GATEWAY_PREFIX },

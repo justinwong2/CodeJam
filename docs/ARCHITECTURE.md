@@ -32,8 +32,17 @@ serves the compiled Web UI. The token is not user identity or authorization.
 
 `apps/server/src/gateway.ts` is the agent-facing half of the request boundary.
 Codex is generated a `config.toml` that points at `POST /gateway/v1/responses`
-instead of Ark, and reads its bearer credential from `RUN_JWT`. The gateway
-replaces that credential with the Ark key and forwards to
+instead of Ark, and reads its bearer credential from `RUN_JWT`.
+
+That credential is verified before anything is forwarded, and fails closed. The
+token must carry a valid HS256 signature (`GATEWAY_JWT_SECRET`) and an unexpired
+`exp`, and the `RunSession` its `jti` names must exist, be unrevoked, still be
+within its own expiry, and agree with the token about which run and Agent are
+calling. Any failure is a `401` with no upstream request at all. Because the
+session — not the token — is the source of truth, `POST /api/agents/:id/revoke`
+stops an Agent's next call mid-run without reaching into a running container.
+
+On success the gateway replaces that credential with the Ark key and forwards to
 `${ARK_BASE_URL}/responses`, streaming the upstream response through unmodified
 so server-sent events reach Codex as they arrive. The upstream key therefore
 never enters an Agent Runtime.
