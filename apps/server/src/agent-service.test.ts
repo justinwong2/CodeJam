@@ -147,6 +147,25 @@ describe("Run sessions", () => {
     await expect.poll(() => service.getRun(run.id).status).toBe("completed");
   });
 
+  it("credentials a run as the Agent's owner, not the seeded default", async () => {
+    const { runner, requests, finish } = pendingRunner();
+    const service = await makeService(runner);
+    const agent = await service.createAgent({ name: "B's own" }, "user-b");
+    const { run } = await service.sendMessage(agent.id, "do the thing");
+    await expect.poll(() => requests.length).toBe(1);
+
+    // The run acts for whoever owns the Agent. Leaving the default here would
+    // make every run's evidence trail say `user-a` whoever started it.
+    const verified = verifyRunJwt(GATEWAY_SECRET, requests[0]?.runJwt ?? "");
+    expect(verified.valid).toBe(true);
+    if (!verified.valid) return;
+    expect(verified.claims.ownerId).toBe("user-b");
+    expect(service.findRunSession(verified.claims.jti)?.ownerId).toBe("user-b");
+
+    finish({ output: "done", threadId: "thread", usage: null });
+    await expect.poll(() => service.getRun(run.id).status).toBe("completed");
+  });
+
   it("never issues the same session twice", async () => {
     const service = await makeService();
     const agent = await service.createAgent({ name: "Repeat" });

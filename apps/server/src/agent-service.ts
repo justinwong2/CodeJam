@@ -260,19 +260,14 @@ export class AgentService implements GatewayDirectory {
     const session: RunSession = {
       runId,
       agentId,
+      // Filled from the stored Agent inside the write below. Who a run acts for
+      // is the store's fact about the Agent, not an assumption made out here.
       ownerId: DEFAULT_OWNER_ID,
       jwtId: randomUUID(),
       revoked: false,
       createdAt: timestamp,
       expiresAt: new Date(expiresAtMs).toISOString(),
     };
-    const runJwt = signRunJwt(this.config.gatewayJwtSecret, {
-      jti: session.jwtId,
-      agentId,
-      ownerId: session.ownerId,
-      runId,
-      exp: Math.floor(expiresAtMs / 1_000),
-    });
     const agentAtStart = await this.store.mutate((database) => {
       const storedAgent = database.agents.find((item) => item.id === agentId);
       if (!storedAgent) {
@@ -286,12 +281,22 @@ export class AgentService implements GatewayDirectory {
       }
       database.runs.push(run);
       database.messages.push(message);
+      session.ownerId = storedAgent.ownerId;
       database.sessions.push(session);
       const snapshot = structuredClone(storedAgent);
       storedAgent.status = "busy";
       storedAgent.lastError = null;
       storedAgent.updatedAt = timestamp;
       return snapshot;
+    });
+    // Signed after the write, so the credential can only ever name an owner and
+    // a run the store has already accepted.
+    const runJwt = signRunJwt(this.config.gatewayJwtSecret, {
+      jti: session.jwtId,
+      agentId,
+      ownerId: agentAtStart.ownerId,
+      runId,
+      exp: Math.floor(expiresAtMs / 1_000),
     });
     const execution = this.executeRun(agentAtStart, run, runJwt);
     this.activeExecutions.set(agentId, execution);
