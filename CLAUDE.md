@@ -72,6 +72,7 @@ apps/
       runner-factory.ts           selects a runner from RUNTIME_PROVIDER
       codex-runner.ts             AgentRunner: Codex as a host process
       container-codex-runner.ts   AgentRunner: Codex in a disposable container
+      gateway.ts                  Agent Access Gateway: agent-facing proxy routes
   web/           React 19 + Vite UI (@launchpad/web)
     src/
       main.tsx     React root
@@ -143,6 +144,14 @@ All under `/api`. Auth is a single optional shared bearer token
 | POST   | `/api/agents/:id/messages` | Send a task; creates an async Run   |
 | GET    | `/api/runs/:id`            | Poll Run status (the UI polls this) |
 
+The Agent Access Gateway adds an **agent-facing** surface under `/gateway`.
+It is deliberately outside the `/api/*` auth hook: agents authenticate with
+their own run credential (`RUN_JWT`), not the browser's shared demo token.
+
+| Method | Path                    | Purpose                                                     |
+| ------ | ----------------------- | ----------------------------------------------------------- |
+| POST   | `/gateway/v1/responses` | Model proxy: injects the Ark key, streams the reply through |
+
 When adding an endpoint, update this table **and** the one in
 [AGENTS.md](AGENTS.md).
 
@@ -154,8 +163,10 @@ When adding an endpoint, update this table **and** the one in
 3. The service invokes the configured `AgentRunner`.
 4. The runner executes Codex. First turn uses `codex exec`; later turns resume
    the stored Codex thread, which is what makes conversations continuous.
-5. Codex calls the Ark Responses API, and may write files and run commands in
-   the Agent's workspace.
+5. Codex calls `POST /gateway/v1/responses` on this server — not Ark directly.
+   The gateway swaps the agent's credential for the Ark key and streams the
+   upstream reply back unmodified. Codex may also write files and run commands
+   in the Agent's workspace.
 6. The runner returns a `RunnerResult`; the service persists the assistant
    message and terminal Run state.
 7. The UI polls `/api/runs/:id` until the Run reaches a terminal status.
@@ -177,6 +188,16 @@ carries the summary table. Key variables:
 `config.ts` runs every path through `path.resolve`. This is why tests must not
 hardcode POSIX paths — see the platform note under Testing.
 
+The gateway introduces **no new environment variable**. It does change who
+writes Codex's `config.toml`: the **active runner** writes it when constructed,
+not server startup, because the gateway origin depends on the runner's vantage
+point — `http://127.0.0.1:<PORT>/gateway/v1` for the host process,
+`http://host.docker.internal:<PORT>/gateway/v1` (or `host.containers.internal`
+on Podman) from inside a container. `env_key` is `RUN_JWT`, never `ARK_API_KEY`.
+Because a container reaches the host on a non-loopback interface,
+`npm run poc` now binds `HOST=0.0.0.0` and generates an ephemeral
+`APP_AUTH_TOKEN` for the run when none is configured.
+
 ## Invariants To Preserve
 
 These are load-bearing. Breaking one costs hackathon points directly:
@@ -186,9 +207,11 @@ These are load-bearing. Breaking one costs hackathon points directly:
 2. **`npm run check` passes.** It is an explicit acceptance-checklist item.
 3. **No secret in source, history, logs, traces, screenshots, or demo output.**
    Also an explicit checklist item, enforced by gitleaks in CI.
-4. **The Ark API key never reaches the browser and never reaches argv.** It is
-   passed via environment to the runner. `container-codex-runner.test.ts`
-   asserts this and must keep asserting it.
+4. **The Ark API key never reaches the browser, argv, or the Agent Runtime.**
+   It stays in the server process and is attached only by the gateway when it
+   forwards upstream. Codex receives `RUN_JWT` instead.
+   `container-codex-runner.test.ts` and `codex-runner.test.ts` assert this and
+   must keep asserting it.
 5. **Runs are asynchronous.** Do not make `POST /api/agents/:id/messages` block
    on completion; the UI depends on polling.
 6. **Codex thread continuity.** Resume semantics are what make multi-turn work.
@@ -204,6 +227,10 @@ These are load-bearing. Breaking one costs hackathon points directly:
   If middleware captures inputs/outputs, redaction is part of the feature, not
   a follow-up.
 - The optional bearer token protects a remote demo. It is not authorization.
+- The Ark key lives in the server process only. It is attached by the gateway
+  when forwarding upstream and must never be copied into a runner environment,
+  argv, a generated `config.toml`, or a log line — including the forwarded
+  `Authorization` header.
 - The JSON store is single-process. Concurrent writers will corrupt it.
 - Ordinary containers are not a hardened multi-tenant boundary. The existing
   CPU/memory/PID limits, dropped capabilities, and `no-new-privileges` are

@@ -28,7 +28,8 @@ Summary — canonical list is in [CLAUDE.md](CLAUDE.md#invariants-to-preserve).
 1. The baseline must keep working: CRUD, lifecycle, Playground, persistence.
 2. `npm run check` must pass.
 3. No secret in source, Git history, logs, traces, screenshots, or demo output.
-4. The Ark API key never reaches the browser or argv.
+4. The Ark API key never reaches the browser, argv, or the Agent Runtime; the
+   gateway attaches it only when forwarding upstream.
 5. Runs stay asynchronous; the UI polls `/api/runs/:id`.
 6. Codex thread continuity powers multi-turn conversations.
 7. Agent deletion archives the workspace; it does not destroy it.
@@ -45,8 +46,17 @@ Summary — canonical list is in [CLAUDE.md](CLAUDE.md#invariants-to-preserve).
 | `apps/server/src/types.ts`                  | Domain types, `AgentRunner`     |
 | `apps/server/src/codex-runner.ts`           | Codex as host process           |
 | `apps/server/src/container-codex-runner.ts` | Codex in disposable container   |
+| `apps/server/src/gateway.ts`                | Agent Access Gateway routes     |
 | `apps/web/src/App.tsx`                      | Entire UI                       |
 | `docs/`                                     | Architecture, deployment, brief |
+
+Browser-facing routes live under `/api/*` behind the shared demo token. The
+agent-facing gateway is separate and deliberately outside that hook — agents
+authenticate with their own run credential:
+
+| Method | Path                    | Purpose                                                     |
+| ------ | ----------------------- | ----------------------------------------------------------- |
+| POST   | `/gateway/v1/responses` | Model proxy: injects the Ark key, streams the reply through |
 
 ## Extension Seams
 

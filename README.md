@@ -88,6 +88,13 @@ Git Bash runs the POC script; `npm run poc` locates it automatically and does
 not use WSL bash. Put the credentials in `.env`, since PowerShell cannot use
 the `VAR=value command` form above. State lives in `.local/`.
 
+The POC listens on every interface, because the Agent Runtime container reaches
+the Agent Access Gateway through the container host alias, which never lands on
+the host loopback interface. Listening beyond loopback requires the shared
+browser token, so the script mints an ephemeral `APP_AUTH_TOKEN` for the run and
+prints it when you have not configured one. Set your own `APP_AUTH_TOKEN` (24+
+characters) in `.env` to skip the unlock screen prompt on every run.
+
 ### 4. Open the browser
 
 Visit <http://localhost:3000>, or open it from the terminal:
@@ -209,16 +216,16 @@ cp deploy/volcengine/terraform.tfvars.example \
 
 ## Configuration
 
-| Variable              | Default             | Purpose                                                |
-| --------------------- | ------------------- | ------------------------------------------------------ |
-| `ARK_API_KEY`         | Required            | Ark model API key.                                     |
-| `ARK_MODEL`           | Required            | Responses-capable endpoint or model ID.                |
-| `ARK_BASE_URL`        | Beijing v3 endpoint | Ark OpenAI-compatible API URL.                         |
-| `APP_AUTH_TOKEN`      | Empty on loopback   | Shared demo token; use 24+ random characters remotely. |
-| `RUNTIME_PROVIDER`    | `local-process`     | `container` for disposable local Runtime containers.   |
-| `CODEX_SANDBOX_MODE`  | `workspace-write`   | Codex inner sandbox mode.                              |
-| `CODEX_TIMEOUT_MS`    | `600000`            | Maximum duration of one turn.                          |
-| `LOCAL_POC_DATA_ROOT` | Platform-specific   | Local metadata, workspace, and session directory.      |
+| Variable              | Default             | Purpose                                                                                          |
+| --------------------- | ------------------- | ------------------------------------------------------------------------------------------------ |
+| `ARK_API_KEY`         | Required            | Ark model API key.                                                                               |
+| `ARK_MODEL`           | Required            | Responses-capable endpoint or model ID.                                                          |
+| `ARK_BASE_URL`        | Beijing v3 endpoint | Ark OpenAI-compatible API URL.                                                                   |
+| `APP_AUTH_TOKEN`      | Empty on loopback   | Shared demo token; required beyond loopback, including `npm run poc`. Use 24+ random characters. |
+| `RUNTIME_PROVIDER`    | `local-process`     | `container` for disposable local Runtime containers.                                             |
+| `CODEX_SANDBOX_MODE`  | `workspace-write`   | Codex inner sandbox mode.                                                                        |
+| `CODEX_TIMEOUT_MS`    | `600000`            | Maximum duration of one turn.                                                                    |
+| `LOCAL_POC_DATA_ROOT` | Platform-specific   | Local metadata, workspace, and session directory.                                                |
 
 See [.env.example](.env.example) for all Runtime and resource-limit options.
 
@@ -231,9 +238,13 @@ flowchart LR
     API --> Runtime{"Runtime provider"}
     Runtime -->|Local POC| Container["Disposable Docker / Colima / Podman container"]
     Runtime -->|ECS profile| Codex["Codex CLI in application container"]
-    Container --> Ark["Volcengine Ark Responses API"]
-    Codex --> Ark
+    Container --> Gateway["Agent Access Gateway\nPOST /gateway/v1/responses"]
+    Codex --> Gateway
+    Gateway -->|injects the Ark key| Ark["Volcengine Ark Responses API"]
 ```
+
+Codex never holds the Ark key: it calls the gateway with a run credential, and
+the gateway attaches the real key on the way upstream, streaming the reply back.
 
 The first turn uses `codex exec`; later turns resume the stored Codex thread.
 Deleting an Agent archives its workspace under `workspaces/.deleted/`.

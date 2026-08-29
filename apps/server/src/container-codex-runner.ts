@@ -1,8 +1,13 @@
 import { execFile, spawn, type ChildProcess } from "node:child_process";
 import { promisify } from "node:util";
-import type { AppConfig } from "./config.js";
+import { writeCodexConfig, type AppConfig } from "./config.js";
 import { buildCodexArgs, parseCodexEventLine } from "./codex-runner.js";
 import { RunCancelledError } from "./errors.js";
+import {
+  gatewayBaseUrl,
+  RUN_JWT_ENV_KEY,
+  RUN_JWT_PLACEHOLDER,
+} from "./gateway.js";
 import type {
   AgentRunner,
   RunUsage,
@@ -35,15 +40,49 @@ export function containerName(agentId: string, instanceId = "default"): string {
   return "launchpad-" + safeInstance + "-" + safeAgent;
 }
 
+function engineName(containerEngine: string): string {
+  return containerEngine.split(/[\\/]/).at(-1)?.toLowerCase() ?? "";
+}
+
+/**
+ * The DNS name a container uses to reach the host running this server. Docker
+ * and Podman each publish their own alias; neither resolves the other's.
+ */
+export function containerHostAlias(containerEngine: string): string {
+  return engineName(containerEngine) === "podman"
+    ? "host.containers.internal"
+    : "host.docker.internal";
+}
+
+/**
+ * The container-engine process environment. It carries the run credential that
+ * `--env RUN_JWT` forwards into the Runtime by name, so no credential value
+ * ever appears in argv. The Ark key is not here at all.
+ */
+export function buildEngineEnvironment(): NodeJS.ProcessEnv {
+  const environment: NodeJS.ProcessEnv = {
+    [RUN_JWT_ENV_KEY]: RUN_JWT_PLACEHOLDER,
+    NO_COLOR: "1",
+  };
+  for (const name of [
+    "PATH",
+    "HOME",
+    "TMPDIR",
+    "LANG",
+    "LC_ALL",
+    "XDG_RUNTIME_DIR",
+  ] as const) {
+    if (process.env[name] !== undefined) environment[name] = process.env[name];
+  }
+  return environment;
+}
+
 export function buildContainerRunArgs(
   request: RunnerRequest,
   config: AppConfig,
 ): string[] {
   const name = containerName(request.agentId, config.runtimeInstanceId);
-  const engineName = config.containerEngine
-    .split(/[\\/]/)
-    .at(-1)
-    ?.toLowerCase();
+  const engine = engineName(config.containerEngine);
   return [
     "run",
     "--rm",
@@ -56,9 +95,14 @@ export function buildContainerRunArgs(
     "io.codejam.agent-id=" + request.agentId,
     "--label",
     "io.codejam.instance-id=" + config.runtimeInstanceId,
-    ...(engineName === "podman" ? ["--userns", "keep-id"] : []),
+    ...(engine === "podman" ? ["--userns", "keep-id"] : []),
     "--network",
     "bridge",
+    // Podman publishes host.containers.internal itself; Docker only resolves
+    // its alias on Linux when the mapping is declared.
+    ...(engine === "podman"
+      ? []
+      : ["--add-host", "host.docker.internal:host-gateway"]),
     "--security-opt",
     "no-new-privileges",
     "--cap-drop",
@@ -71,8 +115,10 @@ export function buildContainerRunArgs(
     String(config.containerPidsLimit),
     "--user",
     config.containerUser,
+    // Forwarded by name: the value comes from the engine process environment,
+    // so no credential is ever visible in argv.
     "--env",
-    "ARK_API_KEY",
+    RUN_JWT_ENV_KEY,
     "--env",
     "CODEX_HOME=/codex-home",
     "--env",
@@ -94,7 +140,25 @@ export function buildContainerRunArgs(
 export class ContainerCodexRunner implements AgentRunner {
   private readonly active = new Map<string, ActiveContainer>();
 
-  constructor(private readonly config: AppConfig) {}
+  private readonly codexConfigReady: Promise<void>;
+
+  constructor(private readonly config: AppConfig) {
+    // Codex runs inside a container, so it reaches the gateway through the
+    // engine's host alias rather than over loopback.
+    this.codexConfigReady = writeCodexConfig(config, {
+      baseUrl: gatewayBaseUrl(
+        containerHostAlias(config.containerEngine),
+        config.port,
+      ),
+      envKey: RUN_JWT_ENV_KEY,
+    });
+    this.codexConfigReady.catch(() => {});
+  }
+
+  /** Resolves once this runner's config.toml is on disk; rejects if it failed. */
+  async ensureCodexConfig(): Promise<void> {
+    await this.codexConfigReady;
+  }
 
   async isAvailable(): Promise<boolean> {
     try {
@@ -147,6 +211,7 @@ export class ContainerCodexRunner implements AgentRunner {
     if (this.active.has(request.agentId)) {
       throw new Error("Agent already has an active Runtime container");
     }
+    await this.ensureCodexConfig();
 
     const child = spawn(
       this.config.containerEngine,
@@ -248,21 +313,6 @@ export class ContainerCodexRunner implements AgentRunner {
   }
 
   private childEnvironment(): NodeJS.ProcessEnv {
-    const environment: NodeJS.ProcessEnv = {
-      ARK_API_KEY: this.config.arkApiKey,
-      NO_COLOR: "1",
-    };
-    for (const name of [
-      "PATH",
-      "HOME",
-      "TMPDIR",
-      "LANG",
-      "LC_ALL",
-      "XDG_RUNTIME_DIR",
-    ] as const) {
-      if (process.env[name] !== undefined)
-        environment[name] = process.env[name];
-    }
-    return environment;
+    return buildEngineEnvironment();
   }
 }

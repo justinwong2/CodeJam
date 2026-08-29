@@ -6,6 +6,7 @@ import { fileURLToPath } from "node:url";
 import { z } from "zod";
 import type { AppConfig } from "./config.js";
 import { HttpError } from "./errors.js";
+import { registerGateway } from "./gateway.js";
 import type { AgentService } from "./agent-service.js";
 
 const agentIdParams = z.object({ id: z.string().uuid() });
@@ -64,6 +65,11 @@ export async function createApp(
       return reply.code(401).send({ error: "Authentication required" });
     }
   });
+
+  // Agent-facing routes. The onRequest hook above guards /api/* only, so the
+  // gateway is deliberately outside APP_AUTH_TOKEN: agents authenticate with
+  // their own per-run credential, not the browser's shared demo token.
+  await registerGateway(app, config);
 
   app.get("/api/health", async () => ({
     ok: true,

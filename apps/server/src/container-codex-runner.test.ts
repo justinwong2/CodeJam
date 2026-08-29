@@ -1,10 +1,15 @@
+import { mkdtemp, readFile, rm } from "node:fs/promises";
+import os from "node:os";
 import path from "node:path";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 import { loadConfig } from "./config.js";
 import {
   buildContainerRunArgs,
+  buildEngineEnvironment,
   containerName,
+  ContainerCodexRunner,
 } from "./container-codex-runner.js";
+import { RUN_JWT_ENV_KEY } from "./gateway.js";
 
 // loadConfig runs CODEX_HOME through path.resolve, so the mounted source path
 // is platform-dependent: "/tmp/codex-home" on POSIX, "C:\tmp\codex-home" on
@@ -68,5 +73,103 @@ describe("Container Codex runner", () => {
     );
     expect(args.slice(-3)).toEqual(["resume", "thread-123", "continue"]);
     expect(args).not.toContain("keep-id");
+  });
+
+  it("carries the run credential into the Runtime, never the Ark key", () => {
+    const config = loadConfig({
+      NODE_ENV: "test",
+      ARK_API_KEY: "secret-that-must-not-appear-in-argv",
+      ARK_MODEL: "ep-test",
+      CODEX_HOME,
+      RUNTIME_PROVIDER: "container",
+      CONTAINER_ENGINE: "docker",
+    });
+    const args = buildContainerRunArgs(
+      {
+        agentId: "agent",
+        workspacePath: "/tmp/workspace",
+        prompt: "hello",
+        threadId: null,
+      },
+      config,
+    );
+
+    expect(args).not.toContain("ARK_API_KEY");
+    expect(args).not.toContain("secret-that-must-not-appear-in-argv");
+    expect(args).toContain(RUN_JWT_ENV_KEY);
+    // Linux Docker only resolves the host alias when the shim is present.
+    expect(args).toContain("--add-host");
+    expect(args).toContain("host.docker.internal:host-gateway");
+
+    const environment = buildEngineEnvironment();
+    expect(environment.ARK_API_KEY).toBeUndefined();
+    expect(Object.values(environment)).not.toContain(
+      "secret-that-must-not-appear-in-argv",
+    );
+    expect(environment[RUN_JWT_ENV_KEY]).toBeTruthy();
+  });
+
+  it("leaves the host-gateway shim off Podman, which supplies its own alias", () => {
+    const config = loadConfig({
+      NODE_ENV: "test",
+      CODEX_HOME,
+      RUNTIME_PROVIDER: "container",
+      CONTAINER_ENGINE: "podman",
+    });
+    const args = buildContainerRunArgs(
+      {
+        agentId: "agent",
+        workspacePath: "/tmp/workspace",
+        prompt: "hello",
+        threadId: null,
+      },
+      config,
+    );
+    expect(args).not.toContain("--add-host");
+  });
+});
+
+describe("Container Codex runner config generation", () => {
+  const temporaryHomes: string[] = [];
+
+  afterEach(async () => {
+    while (temporaryHomes.length > 0) {
+      const directory = temporaryHomes.pop();
+      if (directory) await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  async function temporaryCodexHome(): Promise<string> {
+    const directory = await mkdtemp(path.join(os.tmpdir(), "launchpad-codex-"));
+    temporaryHomes.push(directory);
+    return directory;
+  }
+
+  it("points Codex at the gateway through the engine's host alias", async () => {
+    for (const [engine, alias] of [
+      ["docker", "host.docker.internal"],
+      ["podman", "host.containers.internal"],
+    ] as const) {
+      const codexHome = await temporaryCodexHome();
+      const config = loadConfig({
+        NODE_ENV: "test",
+        ARK_API_KEY: "secret-that-must-not-reach-the-runtime",
+        ARK_MODEL: "ep-test",
+        CODEX_HOME: codexHome,
+        PORT: "4321",
+        RUNTIME_PROVIDER: "container",
+        CONTAINER_ENGINE: engine,
+      });
+      const runner = new ContainerCodexRunner(config);
+      await runner.ensureCodexConfig();
+
+      const toml = await readFile(path.join(codexHome, "config.toml"), "utf8");
+      expect(toml).toContain(`base_url = "http://${alias}:4321/gateway/v1"`);
+      expect(toml).toContain('env_key = "RUN_JWT"');
+      expect(toml).toContain('model = "ep-test"');
+      expect(toml).not.toContain("secret-that-must-not-reach-the-runtime");
+      expect(toml).not.toContain("ARK_API_KEY");
+      expect(toml).not.toContain("ark.cn-beijing.volces.com");
+    }
   });
 });

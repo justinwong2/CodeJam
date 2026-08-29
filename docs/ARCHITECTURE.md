@@ -11,8 +11,9 @@ flowchart LR
     Service --> Runner{"AgentRunner"}
     Runner -->|Local POC| Container["Disposable Runtime container"]
     Runner -->|ECS| Process["Codex child process"]
-    Container --> Ark["Volcengine Ark"]
-    Process --> Ark
+    Container --> Gateway["Agent Access Gateway"]
+    Process --> Gateway
+    Gateway -->|injects the Ark key| Ark["Volcengine Ark"]
 ```
 
 ## Components
@@ -26,6 +27,22 @@ Runs. It never receives the Ark API key.
 
 Validates requests, protects remote demos with a shared bearer token, and
 serves the compiled Web UI. The token is not user identity or authorization.
+
+### Agent Access Gateway
+
+`apps/server/src/gateway.ts` is the agent-facing half of the request boundary.
+Codex is generated a `config.toml` that points at `POST /gateway/v1/responses`
+instead of Ark, and reads its bearer credential from `RUN_JWT`. The gateway
+replaces that credential with the Ark key and forwards to
+`${ARK_BASE_URL}/responses`, streaming the upstream response through unmodified
+so server-sent events reach Codex as they arrive. The upstream key therefore
+never enters an Agent Runtime.
+
+`/gateway/*` sits outside the `/api/*` shared-token hook on purpose: the agent
+is a different principal from the browser operator. Because the origin depends
+on the caller's vantage point, the **active runner** — not startup — writes
+`config.toml`: `127.0.0.1` for the host process, `host.docker.internal` or
+`host.containers.internal` from inside a container.
 
 ### AgentService
 
