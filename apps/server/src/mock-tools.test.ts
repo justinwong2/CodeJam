@@ -64,21 +64,24 @@ describe("Mock tool service credential", () => {
     { method: "POST" as const, url: `${MOCK_TOOLS_PREFIX}/payments` },
   ];
 
-  it.each(routes)("refuses $method $url without a credential", async (route) => {
-    const app = await toolApp();
-    const response = await app.inject({
-      method: route.method,
-      url: route.url,
-      payload: { amount: 10 },
-    });
-    expect(response.statusCode).toBe(401);
-    expect(response.json()).toEqual({
-      error: "Tool service credential required",
-    });
-    // Nothing about the fixture leaks out of a refusal.
-    expect(response.body).not.toContain("quarterly plan");
-    await app.close();
-  });
+  it.each(routes)(
+    "refuses $method $url without a credential",
+    async (route) => {
+      const app = await toolApp();
+      const response = await app.inject({
+        method: route.method,
+        url: route.url,
+        payload: { amount: 10 },
+      });
+      expect(response.statusCode).toBe(401);
+      expect(response.json()).toEqual({
+        error: "Tool service credential required",
+      });
+      // Nothing about the fixture leaks out of a refusal.
+      expect(response.body).not.toContain("quarterly plan");
+      await app.close();
+    },
+  );
 
   it("refuses a credential that is merely the right shape", async () => {
     const app = await toolApp();

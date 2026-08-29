@@ -1,3 +1,4 @@
+import type { FastifyInstance } from "fastify";
 import { mkdtemp, rm } from "node:fs/promises";
 import { createServer, type IncomingMessage, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
@@ -454,6 +455,290 @@ describe("Model gateway authentication", () => {
       authorization: `Bearer ${credentialFor(session, {
         agentId: "another-agent",
       })}`,
+    });
+  });
+});
+
+describe("Tool gateway", () => {
+  /**
+   * Each fixture holds a run open so its credential stays live, and is released
+   * here rather than by every test: a finished run expires its session, which
+   * would turn each of these assertions into the 401 slice 2 already covers.
+   */
+  const openFixtures: {
+    app: FastifyInstance;
+    finish: () => void;
+  }[] = [];
+
+  afterEach(async () => {
+    while (openFixtures.length > 0) {
+      const fixture = openFixtures.pop();
+      if (!fixture) continue;
+      fixture.finish();
+      await fixture.app.close();
+    }
+    await closeOpenServers();
+    await Promise.all(
+      temporaryDirectories
+        .splice(0)
+        .map((directory) => rm(directory, { recursive: true, force: true })),
+    );
+  });
+
+  interface ToolFixture {
+    app: FastifyInstance;
+    service: AgentService;
+    /** Every request that reached the tool service, in order. */
+    toolCalls: string[];
+    /** Starts a run owned by `userId` and returns its live run credential. */
+    runAs: (userId: string) => Promise<string>;
+  }
+
+  async function toolFixture(): Promise<ToolFixture> {
+    const upstream = await startEchoUpstream();
+    const runJwts: string[] = [];
+    let release!: (result: RunnerResult) => void;
+    const pending = new Promise<RunnerResult>((resolve) => {
+      release = resolve;
+    });
+    const { service, config } = await realService(upstream.baseUrl, {
+      // The run stays open, so its credential stays live while the test uses it.
+      run: (request) => {
+        runJwts.push(request.runJwt);
+        return pending;
+      },
+      cancel: async () => false,
+      isAvailable: async () => true,
+    });
+    const app = await createApp(config, service);
+
+    // Instrumentation, not enforcement: it records every request that reaches
+    // the tool service so a denial can be proven to have stopped short of it.
+    const toolCalls: string[] = [];
+    app.addHook("onRequest", async (request) => {
+      if (request.url.startsWith("/internal/tools"))
+        toolCalls.push(request.url);
+    });
+
+    let agents = 0;
+    const runAs = async (userId: string): Promise<string> => {
+      const created = await app.inject({
+        method: "POST",
+        url: "/api/agents",
+        headers: { "x-launchpad-user": userId },
+        payload: { name: `Agent for ${userId}` },
+      });
+      expect(created.statusCode).toBe(201);
+      const agentId = (created.json() as { agent: { id: string } }).agent.id;
+      const started = await app.inject({
+        method: "POST",
+        url: `/api/agents/${agentId}/messages`,
+        payload: { content: "use a tool" },
+      });
+      expect(started.statusCode).toBe(202);
+      agents += 1;
+      await expect.poll(() => runJwts.length).toBe(agents);
+      return runJwts[agents - 1] ?? "";
+    };
+
+    openFixtures.push({
+      app,
+      finish: () => release({ output: "done", threadId: null, usage: null }),
+    });
+    return { app, service, toolCalls, runAs };
+  }
+
+  const callTool = (app: FastifyInstance, runJwt: string, url: string) =>
+    app.inject({
+      method: url.startsWith("payments") ? "POST" : "GET",
+      url: `/gateway/v1/tools/${url}`,
+      headers: {
+        authorization: `Bearer ${runJwt}`,
+        "content-type": "application/json",
+      },
+      ...(url.startsWith("payments")
+        ? { payload: JSON.stringify({ amount: 25, currency: "usd" }) }
+        : {}),
+    });
+
+  it("forwards every tool an admin's Agent is granted", async () => {
+    const { app, toolCalls, runAs } = await toolFixture();
+    const runJwt = await runAs("user-a");
+
+    const doc = await callTool(app, runJwt, "docs/doc-a1");
+    expect(doc.statusCode).toBe(200);
+    expect((doc.json() as { doc: { id: string } }).doc.id).toBe("doc-a1");
+
+    const search = await callTool(app, runJwt, "search?q=gateway");
+    expect(search.statusCode).toBe(200);
+    expect((search.json() as { results: unknown[] }).results.length).toBe(1);
+
+    const payment = await callTool(app, runJwt, "payments");
+    expect(payment.statusCode).toBe(201);
+    expect(payment.json()).toMatchObject({ status: "accepted", amount: 25 });
+
+    // Each authorized call reached the tool service exactly once, with the
+    // path and query it was made with.
+    expect(toolCalls).toEqual([
+      "/internal/tools/docs/doc-a1",
+      "/internal/tools/search?q=gateway",
+      "/internal/tools/payments",
+    ]);
+  });
+
+  it("denies a basic role the payments tool without calling it", async () => {
+    const fixture = await toolFixture();
+    const runJwt = await fixture.runAs("user-b");
+
+    const response = await callTool(fixture.app, runJwt, "payments");
+
+    expect(response.statusCode).toBe(403);
+    expect((response.json() as { error: string }).error).toContain(
+      "may not use the payments tool",
+    );
+    // The half that makes it enforcement: the tool was never reached, so there
+    // is nothing to undo and nothing that briefly happened anyway.
+    expect(fixture.toolCalls).toEqual([]);
+  });
+
+  it("denies a basic role's Agent by role before it can learn a document exists", async () => {
+    // The role check runs first on purpose: an unknown and a forbidden document
+    // must not be distinguishable to a caller who may not use the tool at all.
+    const fixture = await toolFixture();
+    const runJwt = await fixture.runAs("user-b");
+    const response = await fixture.app.inject({
+      method: "GET",
+      url: "/gateway/v1/tools/payments/invoice-a1",
+      headers: { authorization: `Bearer ${runJwt}` },
+    });
+    expect(response.statusCode).toBe(403);
+    expect(fixture.toolCalls).toEqual([]);
+  });
+
+  it("denies one owner's Agent another owner's document, leaving it untouched", async () => {
+    const fixture = await toolFixture();
+    const before = fixture.service.findMockDoc("doc-a1");
+    const runJwt = await fixture.runAs("user-b");
+
+    const response = await callTool(fixture.app, runJwt, "docs/doc-a1");
+
+    expect(response.statusCode).toBe(403);
+    expect((response.json() as { error: string }).error).toContain(
+      "resource owned by user-a",
+    );
+    expect(fixture.toolCalls).toEqual([]);
+    // Neither the content nor the stored record crossed the boundary.
+    expect(response.body).not.toContain("quarterly plan");
+    expect(fixture.service.findMockDoc("doc-a1")).toEqual(before);
+  });
+
+  it("lets an owner read their own document", async () => {
+    const fixture = await toolFixture();
+    const runJwt = await fixture.runAs("user-b");
+
+    const response = await callTool(fixture.app, runJwt, "docs/doc-b1");
+
+    expect(response.statusCode).toBe(200);
+    expect((response.json() as { doc: { ownerId: string } }).doc.ownerId).toBe(
+      "user-b",
+    );
+    expect(fixture.toolCalls).toEqual(["/internal/tools/docs/doc-b1"]);
+  });
+
+  it("answers 404 for a document nobody owns, without calling the tool", async () => {
+    const fixture = await toolFixture();
+    const runJwt = await fixture.runAs("user-a");
+
+    const response = await fixture.app.inject({
+      method: "GET",
+      url: "/gateway/v1/tools/docs/doc-nonexistent",
+      headers: { authorization: `Bearer ${runJwt}` },
+    });
+
+    expect(response.statusCode).toBe(404);
+    expect(fixture.toolCalls).toEqual([]);
+  });
+
+  it("refuses a path that names no tool at all", async () => {
+    const fixture = await toolFixture();
+    const runJwt = await fixture.runAs("user-a");
+
+    const response = await fixture.app.inject({
+      method: "GET",
+      url: "/gateway/v1/tools/model/responses",
+      headers: { authorization: `Bearer ${runJwt}` },
+    });
+
+    expect(response.statusCode).toBe(403);
+    expect(fixture.toolCalls).toEqual([]);
+  });
+
+  it("denies an Agent whose owner is no longer a known user", async () => {
+    const fixture = await toolFixture();
+    const runJwt = await fixture.runAs("user-a");
+    // Reassigning the Agent to a human the store does not know leaves no role
+    // to resolve. Falling back to a default role here would quietly grant one.
+    const store = (fixture.service as unknown as { store: JsonStore }).store;
+    await store.mutate((database) => {
+      for (const agent of database.agents) agent.ownerId = "user-ghost";
+    });
+
+    const response = await callTool(fixture.app, runJwt, "search");
+
+    expect(response.statusCode).toBe(403);
+    expect(fixture.toolCalls).toEqual([]);
+  });
+});
+
+describe("Tool gateway authentication", () => {
+  afterEach(closeOpenServers);
+
+  /** The tool proxy answers an unusable credential exactly as the model proxy does. */
+  async function expectToolDenied(
+    session: RunSession | null,
+    headers: Record<string, string>,
+  ): Promise<void> {
+    const upstream = await startEchoUpstream();
+    const app = await createApp(
+      configFor(upstream.baseUrl),
+      session ? serviceWith(session) : serviceWith(),
+    );
+    const toolCalls: string[] = [];
+    app.addHook("onRequest", async (request) => {
+      if (request.url.startsWith("/internal/tools"))
+        toolCalls.push(request.url);
+    });
+    const response = await app.inject({
+      method: "GET",
+      url: "/gateway/v1/tools/docs/doc-a1",
+      headers,
+    });
+    // 401, not 403: authentication failed, so no authorization work was even
+    // attempted — the stub service has no agents to resolve a principal from,
+    // and reaching that code would have thrown rather than denied.
+    expect(response.statusCode).toBe(401);
+    expect(toolCalls).toEqual([]);
+    expect(response.body).not.toContain(ARK_KEY);
+    expect(response.body).not.toContain(GATEWAY_SECRET);
+    await app.close();
+  }
+
+  it("denies a tool call carrying no credential", async () => {
+    await expectToolDenied(liveSession(), {});
+  });
+
+  it("denies a tool call with a tampered signature", async () => {
+    const session = liveSession();
+    const [header, claims] = credentialFor(session).split(".");
+    await expectToolDenied(session, {
+      authorization: `Bearer ${header}.${claims}.forged-signature`,
+    });
+  });
+
+  it("denies a tool call from a revoked session", async () => {
+    const session = liveSession({ revoked: true });
+    await expectToolDenied(session, {
+      authorization: `Bearer ${credentialFor(session)}`,
     });
   });
 });

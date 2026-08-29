@@ -2,12 +2,7 @@ import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import {
-  DATABASE_VERSION,
-  JsonStore,
-  SEED_DOCS,
-  SEED_USERS,
-} from "./store.js";
+import { DATABASE_VERSION, JsonStore, SEED_DOCS, SEED_USERS } from "./store.js";
 import { DEFAULT_OWNER_ID } from "./types.js";
 
 const temporaryDirectories: string[] = [];
