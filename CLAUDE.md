@@ -74,6 +74,7 @@ apps/
       container-codex-runner.ts   AgentRunner: Codex in a disposable container
       gateway.ts                  Agent Access Gateway: agent-facing proxy routes
       run-jwt.ts                  HS256 sign/verify for per-run credentials
+      authz.ts                    can(): the pure authorization decision
   web/           React 19 + Vite UI (@launchpad/web)
     src/
       main.tsx     React root
@@ -134,6 +135,7 @@ All under `/api`. Auth is a single optional shared bearer token
 | GET    | `/api/health`              | Liveness probe                       |
 | GET    | `/api/auth`                | Whether a token is required          |
 | GET    | `/api/system`              | Runtime/engine diagnostics           |
+| GET    | `/api/users`               | Seeded users for the dev switcher    |
 | GET    | `/api/agents`              | List Agents                          |
 | POST   | `/api/agents`              | Create an Agent                      |
 | GET    | `/api/agents/:id`          | Get one Agent                        |
@@ -146,6 +148,11 @@ All under `/api`. Auth is a single optional shared bearer token
 | POST   | `/api/agents/:id/messages` | Send a task; creates an async Run    |
 | POST   | `/api/agents/:id/revoke`   | Revoke the Agent's live run sessions |
 | GET    | `/api/runs/:id`            | Poll Run status (the UI polls this)  |
+
+Browser requests name the human they act as with an `x-launchpad-user` header
+(a seeded user id; `user-a` when absent, `400` when unknown). This is mock
+authentication by design — the middleware being scored is authorization — and
+it decides which user a newly created Agent is owned by.
 
 The Agent Access Gateway adds an **agent-facing** surface under `/gateway`.
 It is deliberately outside the `/api/*` auth hook: agents authenticate with

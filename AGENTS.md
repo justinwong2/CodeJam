@@ -50,6 +50,7 @@ Summary — canonical list is in [CLAUDE.md](CLAUDE.md#invariants-to-preserve).
 | `apps/server/src/container-codex-runner.ts` | Codex in disposable container   |
 | `apps/server/src/gateway.ts`                | Agent Access Gateway routes     |
 | `apps/server/src/run-jwt.ts`                | Per-run credential sign/verify  |
+| `apps/server/src/authz.ts`                  | `can()`, roles, ownership rule  |
 | `apps/web/src/App.tsx`                      | Entire UI                       |
 | `docs/`                                     | Architecture, deployment, brief |
 
@@ -58,7 +59,12 @@ including the operator's kill switch:
 
 | Method | Path                     | Purpose                                      |
 | ------ | ------------------------ | -------------------------------------------- |
+| GET    | `/api/users`             | Seeded users for the dev user switcher       |
 | POST   | `/api/agents/:id/revoke` | Revoke the Agent's live run sessions mid-run |
+
+Browser requests name the acting human with `x-launchpad-user` (a seeded user
+id; `user-a` when absent, `400` when unknown). It sets a created Agent's
+`ownerId`; the gateway never reads it.
 
 The agent-facing gateway is separate and deliberately outside that hook —
 agents authenticate with their own per-run credential, which the control plane
