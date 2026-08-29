@@ -75,6 +75,7 @@ apps/
       gateway.ts                  Agent Access Gateway: agent-facing proxy routes
       run-jwt.ts                  HS256 sign/verify for per-run credentials
       authz.ts                    can(): the pure authorization decision
+      mock-tools.ts               docs/search/payments the gateway forwards to
   web/           React 19 + Vite UI (@launchpad/web)
     src/
       main.tsx     React root
@@ -158,9 +159,16 @@ The Agent Access Gateway adds an **agent-facing** surface under `/gateway`.
 It is deliberately outside the `/api/*` auth hook: agents authenticate with
 their own run credential (`RUN_JWT`), not the browser's shared demo token.
 
-| Method | Path                    | Purpose                                                                               |
-| ------ | ----------------------- | ------------------------------------------------------------------------------------- |
-| POST   | `/gateway/v1/responses` | Model proxy: verifies the run session, injects the Ark key, streams the reply through |
+| Method | Path                        | Purpose                                                                                      |
+| ------ | --------------------------- | -------------------------------------------------------------------------------------------- |
+| POST   | `/gateway/v1/responses`     | Model proxy: verifies the run session, injects the Ark key, streams the reply through        |
+| ALL    | `/gateway/v1/tools/:tool/*` | Tool proxy: verifies the run session, resolves the principal, applies `can()`, then forwards |
+
+`:tool` is `docs`, `search`, or `payments`; anything else is a `403`. The proxy
+forwards to the mock tool service at `/internal/tools/*`, which accepts only
+calls carrying `GATEWAY_TOOL_CREDENTIAL` — so skipping the gateway is refused
+rather than merely undocumented. That surface is not a browser API and is not
+listed above.
 
 When adding an endpoint, update this table **and** the one in
 [AGENTS.md](AGENTS.md).
@@ -180,24 +188,31 @@ When adding an endpoint, update this table **and** the one in
    expiry, `revoked`), then swaps it for the Ark key and streams the upstream
    reply back unmodified. Anything unverifiable is a `401` with no upstream
    call. Codex may also write files and run commands in the Agent's workspace.
-6. The runner returns a `RunnerResult`; the service persists the assistant
+6. A tool call goes to `/gateway/v1/tools/:tool/*` instead. The gateway verifies
+   the same credential, then resolves the `Principal` from the Agent's **current
+   owner** in the store — permissions are never in the token — and runs
+   `can(principal, tool, resource?)`. Only on allow does it attach
+   `GATEWAY_TOOL_CREDENTIAL` and forward; a denial is a `403` and the tool is
+   never called.
+7. The runner returns a `RunnerResult`; the service persists the assistant
    message and terminal Run state, and expires the run's session.
-7. The UI polls `/api/runs/:id` until the Run reaches a terminal status.
+8. The UI polls `/api/runs/:id` until the Run reaches a terminal status.
 
 ## Configuration
 
 `.env` is gitignored. `.env.example` is the documented template and the README
 carries the summary table. Key variables:
 
-| Variable             | Default           | Purpose                                  |
-| -------------------- | ----------------- | ---------------------------------------- |
-| `ARK_API_KEY`        | required          | Ark model API key                        |
-| `ARK_MODEL`          | required          | Responses-capable endpoint ID (`ep-...`) |
-| `APP_AUTH_TOKEN`     | empty             | Shared demo token; 24+ chars if remote   |
-| `GATEWAY_JWT_SECRET` | required          | Signs per-run gateway credentials (16+)  |
-| `RUNTIME_PROVIDER`   | `local-process`   | `container` for disposable local Runtime |
-| `CODEX_SANDBOX_MODE` | `workspace-write` | Codex inner sandbox mode                 |
-| `CODEX_TIMEOUT_MS`   | `600000`          | Max duration of one turn                 |
+| Variable                  | Default           | Purpose                                  |
+| ------------------------- | ----------------- | ---------------------------------------- |
+| `ARK_API_KEY`             | required          | Ark model API key                        |
+| `ARK_MODEL`               | required          | Responses-capable endpoint ID (`ep-...`) |
+| `APP_AUTH_TOKEN`          | empty             | Shared demo token; 24+ chars if remote   |
+| `GATEWAY_JWT_SECRET`      | required          | Signs per-run gateway credentials (16+)  |
+| `GATEWAY_TOOL_CREDENTIAL` | per-process       | Gateway → mock tool service; optional    |
+| `RUNTIME_PROVIDER`        | `local-process`   | `container` for disposable local Runtime |
+| `CODEX_SANDBOX_MODE`      | `workspace-write` | Codex inner sandbox mode                 |
+| `CODEX_TIMEOUT_MS`        | `600000`          | Max duration of one turn                 |
 
 `config.ts` runs every path through `path.resolve`. This is why tests must not
 hardcode POSIX paths — see the platform note under Testing.
@@ -210,6 +225,14 @@ calls. It never leaves the server process — not into a token, a log line, an
 error body, or a runner environment. `npm run poc` mints an ephemeral secret
 for the run when none is configured; `npm run dev` reads the process
 environment, so export one there.
+
+`GATEWAY_TOOL_CREDENTIAL` is what the gateway presents to the mock tool
+service, and the only reason a tool call cannot skip the authorization check.
+It is **not** required: both ends of the check live in this process, so
+`loadConfig` mints one per process when it is unset — there is no configuration
+a deployment can forget into a weak one. A value that _is_ set is held to the
+same bar as the signing secret (16+ characters, no `replace-` placeholder) and,
+like it, never leaves the server process.
 
 The gateway also changes who
 writes Codex's `config.toml`: the **active runner** writes it when constructed,
@@ -247,6 +270,12 @@ These are load-bearing. Breaking one costs hackathon points directly:
    revoked credential is a `401` and the upstream is never called.
    `gateway.test.ts` asserts both halves — the denial _and_ the absent upstream
    request — and must keep asserting both.
+10. **Authorization is decided server-side, per call, from stored ownership.**
+    Permissions are never in the run credential: the gateway resolves the
+    principal from the Agent's current owner and calls `can()` on every tool
+    call, so a denial is a `403` with the tool untouched. The mock tool service
+    is reachable only with `GATEWAY_TOOL_CREDENTIAL`, which is what makes
+    skipping the gateway a refusal rather than a shortcut.
 
 ## Security And Data Handling
 
@@ -258,6 +287,9 @@ These are load-bearing. Breaking one costs hackathon points directly:
 - `GATEWAY_JWT_SECRET` lives in the server process only. It signs and verifies
   run credentials and must never appear in a token, a log line, an error body,
   a runner environment, or a test fixture that looks like a real secret.
+- `GATEWAY_TOOL_CREDENTIAL` lives in the server process only, under the same
+  rules. The gateway attaches it when forwarding an authorized tool call and
+  nowhere else; it must never reach a runner environment or a response body.
 - The Ark key lives in the server process only. It is attached by the gateway
   when forwarding upstream and must never be copied into a runner environment,
   argv, a generated `config.toml`, or a log line — including the forwarded
@@ -274,8 +306,8 @@ npm run test        # Vitest, server workspace
 ```
 
 Tests live beside sources as `*.test.ts`. Current suites cover `agent-service`,
-`app`, `config`, `gateway`, `run-jwt`, `store`, `codex-runner`,
-`container-codex-runner`, and the runner spawn environments.
+`app`, `authz`, `config`, `gateway`, `mock-tools`, `run-jwt`, `store`,
+`codex-runner`, `container-codex-runner`, and the runner spawn environments.
 
 **Platform note:** `config.ts` calls `path.resolve` on every path, so resolved
 paths differ between POSIX and Windows. Tests must resolve expected paths

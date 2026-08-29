@@ -47,6 +47,19 @@ On success the gateway replaces that credential with the Ark key and forwards to
 so server-sent events reach Codex as they arrive. The upstream key therefore
 never enters an Agent Runtime.
 
+Tool calls take `ALL /gateway/v1/tools/:tool/*` and pass through the same
+verification first, then an authorization step the model proxy has no need of.
+The gateway resolves a `Principal` from the Agent's **current owner** in the
+store — permissions are deliberately kept out of the credential, so a role
+change or a re-owned Agent takes effect on the next call rather than at expiry —
+and applies `can(principal, tool, resource?)` from `apps/server/src/authz.ts`.
+Ownership-scoped tools resolve the target's owner as the resource; `docs` is the
+one that does. Only on allow does the gateway attach `GATEWAY_TOOL_CREDENTIAL`
+and forward to the mock tool service in `apps/server/src/mock-tools.ts`. A
+denial is a `403` and the tool is never reached, and because the tool service
+refuses anything without that credential, the check cannot be walked around by
+calling it directly.
+
 `/gateway/*` sits outside the `/api/*` shared-token hook on purpose: the agent
 is a different principal from the browser operator. Because the origin depends
 on the caller's vantage point, the **active runner** — not startup — writes

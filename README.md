@@ -224,17 +224,18 @@ cp deploy/volcengine/terraform.tfvars.example \
 
 ## Configuration
 
-| Variable              | Default             | Purpose                                                                                                              |
-| --------------------- | ------------------- | -------------------------------------------------------------------------------------------------------------------- |
-| `ARK_API_KEY`         | Required            | Ark model API key.                                                                                                   |
-| `ARK_MODEL`           | Required            | Responses-capable endpoint or model ID.                                                                              |
-| `ARK_BASE_URL`        | Beijing v3 endpoint | Ark OpenAI-compatible API URL.                                                                                       |
-| `APP_AUTH_TOKEN`      | Empty on loopback   | Shared demo token; required beyond loopback, including `npm run poc`. Use 24+ random characters.                     |
-| `GATEWAY_JWT_SECRET`  | Required            | Signs each run's gateway credential. 16+ characters; startup fails without it. `npm run poc` mints an ephemeral one. |
-| `RUNTIME_PROVIDER`    | `local-process`     | `container` for disposable local Runtime containers.                                                                 |
-| `CODEX_SANDBOX_MODE`  | `workspace-write`   | Codex inner sandbox mode.                                                                                            |
-| `CODEX_TIMEOUT_MS`    | `600000`            | Maximum duration of one turn.                                                                                        |
-| `LOCAL_POC_DATA_ROOT` | Platform-specific   | Local metadata, workspace, and session directory.                                                                    |
+| Variable                  | Default               | Purpose                                                                                                                                                                                       |
+| ------------------------- | --------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `ARK_API_KEY`             | Required              | Ark model API key.                                                                                                                                                                            |
+| `ARK_MODEL`               | Required              | Responses-capable endpoint or model ID.                                                                                                                                                       |
+| `ARK_BASE_URL`            | Beijing v3 endpoint   | Ark OpenAI-compatible API URL.                                                                                                                                                                |
+| `APP_AUTH_TOKEN`          | Empty on loopback     | Shared demo token; required beyond loopback, including `npm run poc`. Use 24+ random characters.                                                                                              |
+| `GATEWAY_JWT_SECRET`      | Required              | Signs each run's gateway credential. 16+ characters; startup fails without it. `npm run poc` mints an ephemeral one.                                                                          |
+| `GATEWAY_TOOL_CREDENTIAL` | Generated per process | What the gateway presents to the mock tool service, so a tool cannot be reached without passing the authorization check. Optional: set it only to pin the value, using 16+ random characters. |
+| `RUNTIME_PROVIDER`        | `local-process`       | `container` for disposable local Runtime containers.                                                                                                                                          |
+| `CODEX_SANDBOX_MODE`      | `workspace-write`     | Codex inner sandbox mode.                                                                                                                                                                     |
+| `CODEX_TIMEOUT_MS`        | `600000`              | Maximum duration of one turn.                                                                                                                                                                 |
+| `LOCAL_POC_DATA_ROOT`     | Platform-specific     | Local metadata, workspace, and session directory.                                                                                                                                             |
 
 See [.env.example](.env.example) for all Runtime and resource-limit options.
 

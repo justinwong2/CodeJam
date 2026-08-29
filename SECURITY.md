@@ -27,6 +27,13 @@ credentials, personal data, or exploit details in an issue.
   hook by design — agents authenticate as themselves, not as the browser
   operator. `GATEWAY_JWT_SECRET` signs those credentials, never leaves the
   server process, and is required at startup.
+- Tool calls are authorized as well as authenticated. The gateway resolves the
+  acting human from the Agent's current owner in the store — permissions are
+  deliberately absent from the run credential — and applies `can()` before
+  forwarding, so a role or ownership denial is a `403` and the tool is never
+  called. The mock tool service accepts only calls carrying
+  `GATEWAY_TOOL_CREDENTIAL`, which never leaves the server process, so the
+  check cannot be walked around by calling the tool directly.
 - Run credentials are bearer tokens carried over plain HTTP between the Runtime
   container and the host gateway. They are per-run, revocable, and expire with
   the turn, but anyone who can read that local traffic during a run can replay

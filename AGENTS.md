@@ -36,6 +36,8 @@ Summary — canonical list is in [CLAUDE.md](CLAUDE.md#invariants-to-preserve).
 8. Middleware enforces server-side, never UI-only.
 9. The gateway fails closed: an unverifiable run credential is `401` and the
    upstream is never called.
+10. Authorization is decided per call from stored ownership, not from the token:
+    a denied tool call is `403` and the tool is never reached.
 
 ## Repo Map
 
@@ -51,6 +53,7 @@ Summary — canonical list is in [CLAUDE.md](CLAUDE.md#invariants-to-preserve).
 | `apps/server/src/gateway.ts`                | Agent Access Gateway routes     |
 | `apps/server/src/run-jwt.ts`                | Per-run credential sign/verify  |
 | `apps/server/src/authz.ts`                  | `can()`, roles, ownership rule  |
+| `apps/server/src/mock-tools.ts`             | docs/search/payments downstream |
 | `apps/web/src/App.tsx`                      | Entire UI                       |
 | `docs/`                                     | Architecture, deployment, brief |
 
@@ -70,9 +73,17 @@ The agent-facing gateway is separate and deliberately outside that hook —
 agents authenticate with their own per-run credential, which the control plane
 mints and can revoke:
 
-| Method | Path                    | Purpose                                                                               |
-| ------ | ----------------------- | ------------------------------------------------------------------------------------- |
-| POST   | `/gateway/v1/responses` | Model proxy: verifies the run session, injects the Ark key, streams the reply through |
+| Method | Path                        | Purpose                                                                                      |
+| ------ | --------------------------- | -------------------------------------------------------------------------------------------- |
+| POST   | `/gateway/v1/responses`     | Model proxy: verifies the run session, injects the Ark key, streams the reply through        |
+| ALL    | `/gateway/v1/tools/:tool/*` | Tool proxy: verifies the run session, resolves the principal, applies `can()`, then forwards |
+
+`:tool` is `docs`, `search`, or `payments`. The role comes from the Agent's
+current owner in the store, never from the token, so a denial is a `403` and the
+tool is never called. Forwarding targets the mock tool service at
+`/internal/tools/*`, which accepts only calls carrying
+`GATEWAY_TOOL_CREDENTIAL` — the credential is what makes skipping the gateway a
+refusal rather than a shortcut.
 
 ## Extension Seams
 
