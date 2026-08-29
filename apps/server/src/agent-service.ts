@@ -11,9 +11,10 @@ import type {
   AgentRunner,
   CreateAgentInput,
   Database,
+  GatewayDirectory,
   Message,
+  MockDoc,
   RunSession,
-  RunSessionDirectory,
   UpdateAgentInput,
   User,
 } from "./types.js";
@@ -41,7 +42,7 @@ function expireRunSessions(
   }
 }
 
-export class AgentService implements RunSessionDirectory {
+export class AgentService implements GatewayDirectory {
   private readonly activeExecutions = new Map<string, Promise<void>>();
   private readonly cancellationRequests = new Set<string>();
 
@@ -321,6 +322,24 @@ export class AgentService implements RunSessionDirectory {
           ? "Codex CLI in " + this.config.containerEngine + " Runtime"
           : "Codex CLI in application container",
     };
+  }
+
+  /**
+   * The Agent behind an id, or nothing. `getAgent` throws a 404 because a
+   * browser asked for something absent; the gateway asks in order to decide,
+   * and turns a missing Agent into a denial rather than a server error.
+   */
+  findAgent(id: string): Agent | undefined {
+    return this.store.select((database) =>
+      database.agents.find((agent) => agent.id === id),
+    );
+  }
+
+  /** A document from the mock tool fixture, for the ownership comparison. */
+  findMockDoc(id: string): MockDoc | undefined {
+    return this.store.select((database) =>
+      database.docs.find((doc) => doc.id === id),
+    );
   }
 
   /** The live session behind a run credential, looked up by its `jti`. */

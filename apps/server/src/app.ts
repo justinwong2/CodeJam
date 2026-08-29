@@ -7,6 +7,7 @@ import { z } from "zod";
 import type { AppConfig } from "./config.js";
 import { HttpError } from "./errors.js";
 import { registerGateway } from "./gateway.js";
+import { registerMockTools } from "./mock-tools.js";
 import { DEFAULT_OWNER_ID } from "./types.js";
 import type { User } from "./types.js";
 import type { AgentService } from "./agent-service.js";
@@ -65,6 +66,8 @@ export async function createApp(
     bodyLimit: 1_048_576,
   });
 
+  setErrorHandler(app);
+
   await app.register(cors, {
     origin:
       config.nodeEnv === "development"
@@ -107,6 +110,11 @@ export async function createApp(
   // gateway is deliberately outside APP_AUTH_TOKEN: agents authenticate with
   // their own per-run credential, which the service mints and can revoke.
   await registerGateway(app, config, service);
+
+  // The downstream the gateway forwards authorized tool calls to. Also outside
+  // the browser hook, and guarded instead by a credential only the gateway
+  // holds — so the authorization check cannot be walked around by calling here.
+  await registerMockTools(app, config, service);
 
   app.get("/api/health", async () => ({
     ok: true,
@@ -199,6 +207,16 @@ export async function createApp(
     });
   }
 
+  return app;
+}
+
+/**
+ * Installed before any route is registered: an encapsulated plugin captures the
+ * error handler in force when it boots, so a handler set afterwards would leave
+ * the gateway and tool scopes on Fastify's default — which answers a rejected
+ * body with a bare 500 instead of the 400 the caller earned.
+ */
+function setErrorHandler(app: FastifyInstance): void {
   app.setErrorHandler((error, request, reply) => {
     const appError = error instanceof Error ? error : new Error(String(error));
     const validationError = error instanceof z.ZodError;
@@ -222,6 +240,4 @@ export async function createApp(
       ...(validationError ? { details: error.issues } : {}),
     });
   });
-
-  return app;
 }
