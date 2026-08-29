@@ -42,6 +42,7 @@ async function makeService(
   temporaryDirectories.push(root);
   const config = loadConfig({
     NODE_ENV: "test",
+    GATEWAY_JWT_SECRET: "gateway-test-signing-secret",
     APP_DATA_DIR: path.join(root, "data"),
     AGENT_WORKSPACE_ROOT: path.join(root, "workspaces"),
     CODEX_HOME: path.join(root, "codex"),

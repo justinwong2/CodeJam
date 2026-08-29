@@ -93,7 +93,8 @@ detect_engine() {
 load_env_credentials() {
   [[ -f .env ]] || return 0
   local name value
-  for name in ARK_API_KEY ARK_MODEL ARK_BASE_URL APP_AUTH_TOKEN; do
+  for name in ARK_API_KEY ARK_MODEL ARK_BASE_URL APP_AUTH_TOKEN \
+    GATEWAY_JWT_SECRET; do
     if [[ -z "${!name:-}" ]]; then
       value="$(sed -n "s/^[[:space:]]*${name}=//p" .env | tail -n 1)"
       value="${value%$'\r'}"
@@ -227,6 +228,17 @@ case "$HOST" in
     fi
     ;;
 esac
+# The gateway signs each run's credential with this and refuses to start
+# without it. Mint an ephemeral secret when the operator has not configured one:
+# run sessions never outlive the process, so a per-run secret costs nothing and
+# keeps the demo working without a manual step.
+if [[ -z "${GATEWAY_JWT_SECRET:-}" || "${GATEWAY_JWT_SECRET}" == replace-* \
+  || ${#GATEWAY_JWT_SECRET} -lt 16 ]]; then
+  GATEWAY_JWT_SECRET="$(node -e \
+    "process.stdout.write(require('node:crypto').randomBytes(32).toString('base64url'))")"
+  export GATEWAY_JWT_SECRET
+fi
+
 export CODEX_SANDBOX_MODE="$codex_sandbox_mode"
 export RUNTIME_PROVIDER=container
 export CONTAINER_ENGINE="$engine"

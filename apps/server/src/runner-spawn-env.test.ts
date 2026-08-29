@@ -86,6 +86,7 @@ describe("Runner spawn environments", () => {
     vi.stubEnv("ARK_API_KEY", ARK_KEY);
     const config = loadConfig({
       NODE_ENV: "test",
+      GATEWAY_JWT_SECRET: "gateway-test-signing-secret",
       ARK_API_KEY: ARK_KEY,
       ARK_MODEL: "ep-test",
       CODEX_HOME: await temporaryCodexHome(),
@@ -111,6 +112,7 @@ describe("Runner spawn environments", () => {
     vi.stubEnv("ARK_API_KEY", ARK_KEY);
     const config = loadConfig({
       NODE_ENV: "test",
+      GATEWAY_JWT_SECRET: "gateway-test-signing-secret",
       ARK_API_KEY: ARK_KEY,
       ARK_MODEL: "ep-test",
       CODEX_HOME: await temporaryCodexHome(),

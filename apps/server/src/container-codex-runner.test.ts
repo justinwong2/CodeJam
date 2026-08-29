@@ -21,6 +21,7 @@ describe("Container Codex runner", () => {
   it("builds an isolated Docker/Podman-compatible invocation", () => {
     const config = loadConfig({
       NODE_ENV: "test",
+      GATEWAY_JWT_SECRET: "gateway-test-signing-secret",
       ARK_API_KEY: "secret-that-must-not-appear-in-argv",
       ARK_MODEL: "ep-test",
       CODEX_HOME,
@@ -59,6 +60,7 @@ describe("Container Codex runner", () => {
   it("resumes a thread inside the mounted Runtime workspace", () => {
     const config = loadConfig({
       NODE_ENV: "test",
+      GATEWAY_JWT_SECRET: "gateway-test-signing-secret",
       CODEX_HOME,
       RUNTIME_PROVIDER: "container",
     });
@@ -78,6 +80,7 @@ describe("Container Codex runner", () => {
   it("carries the run credential into the Runtime, never the Ark key", () => {
     const config = loadConfig({
       NODE_ENV: "test",
+      GATEWAY_JWT_SECRET: "gateway-test-signing-secret",
       ARK_API_KEY: "secret-that-must-not-appear-in-argv",
       ARK_MODEL: "ep-test",
       CODEX_HOME,
@@ -112,6 +115,7 @@ describe("Container Codex runner", () => {
   it("leaves the host-gateway shim off Podman, which supplies its own alias", () => {
     const config = loadConfig({
       NODE_ENV: "test",
+      GATEWAY_JWT_SECRET: "gateway-test-signing-secret",
       CODEX_HOME,
       RUNTIME_PROVIDER: "container",
       CONTAINER_ENGINE: "podman",
@@ -153,6 +157,7 @@ describe("Container Codex runner config generation", () => {
       const codexHome = await temporaryCodexHome();
       const config = loadConfig({
         NODE_ENV: "test",
+        GATEWAY_JWT_SECRET: "gateway-test-signing-secret",
         ARK_API_KEY: "secret-that-must-not-reach-the-runtime",
         ARK_MODEL: "ep-test",
         CODEX_HOME: codexHome,

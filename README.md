@@ -159,6 +159,7 @@ Required values in `.env`:
 ARK_API_KEY=your-ark-api-key
 ARK_MODEL=ep-your-endpoint-id
 APP_AUTH_TOKEN=replace-with-at-least-24-random-characters
+GATEWAY_JWT_SECRET=replace-with-at-least-16-random-characters
 ```
 
 Start the application:
@@ -179,8 +180,15 @@ docker compose down
 npm install
 cp .env.example .env
 npm install --global @openai/codex@0.111.0
+export GATEWAY_JWT_SECRET="$(node -e \
+  "console.log(require('node:crypto').randomBytes(32).toString('base64url'))")"
 npm run dev
 ```
+
+`npm run dev` reads the process environment rather than `.env`, and the server
+refuses to start without `GATEWAY_JWT_SECRET`: the gateway verifies every agent
+call against it. Export `ARK_API_KEY` and `ARK_MODEL` the same way to run real
+tasks.
 
 - Web UI: <http://localhost:5173>
 - API: <http://localhost:3000>
@@ -216,16 +224,17 @@ cp deploy/volcengine/terraform.tfvars.example \
 
 ## Configuration
 
-| Variable              | Default             | Purpose                                                                                          |
-| --------------------- | ------------------- | ------------------------------------------------------------------------------------------------ |
-| `ARK_API_KEY`         | Required            | Ark model API key.                                                                               |
-| `ARK_MODEL`           | Required            | Responses-capable endpoint or model ID.                                                          |
-| `ARK_BASE_URL`        | Beijing v3 endpoint | Ark OpenAI-compatible API URL.                                                                   |
-| `APP_AUTH_TOKEN`      | Empty on loopback   | Shared demo token; required beyond loopback, including `npm run poc`. Use 24+ random characters. |
-| `RUNTIME_PROVIDER`    | `local-process`     | `container` for disposable local Runtime containers.                                             |
-| `CODEX_SANDBOX_MODE`  | `workspace-write`   | Codex inner sandbox mode.                                                                        |
-| `CODEX_TIMEOUT_MS`    | `600000`            | Maximum duration of one turn.                                                                    |
-| `LOCAL_POC_DATA_ROOT` | Platform-specific   | Local metadata, workspace, and session directory.                                                |
+| Variable              | Default             | Purpose                                                                                                              |
+| --------------------- | ------------------- | -------------------------------------------------------------------------------------------------------------------- |
+| `ARK_API_KEY`         | Required            | Ark model API key.                                                                                                   |
+| `ARK_MODEL`           | Required            | Responses-capable endpoint or model ID.                                                                              |
+| `ARK_BASE_URL`        | Beijing v3 endpoint | Ark OpenAI-compatible API URL.                                                                                       |
+| `APP_AUTH_TOKEN`      | Empty on loopback   | Shared demo token; required beyond loopback, including `npm run poc`. Use 24+ random characters.                     |
+| `GATEWAY_JWT_SECRET`  | Required            | Signs each run's gateway credential. 16+ characters; startup fails without it. `npm run poc` mints an ephemeral one. |
+| `RUNTIME_PROVIDER`    | `local-process`     | `container` for disposable local Runtime containers.                                                                 |
+| `CODEX_SANDBOX_MODE`  | `workspace-write`   | Codex inner sandbox mode.                                                                                            |
+| `CODEX_TIMEOUT_MS`    | `600000`            | Maximum duration of one turn.                                                                                        |
+| `LOCAL_POC_DATA_ROOT` | Platform-specific   | Local metadata, workspace, and session directory.                                                                    |
 
 See [.env.example](.env.example) for all Runtime and resource-limit options.
 

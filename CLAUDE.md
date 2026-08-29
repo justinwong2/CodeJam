@@ -181,6 +181,7 @@ carries the summary table. Key variables:
 | `ARK_API_KEY`        | required          | Ark model API key                        |
 | `ARK_MODEL`          | required          | Responses-capable endpoint ID (`ep-...`) |
 | `APP_AUTH_TOKEN`     | empty             | Shared demo token; 24+ chars if remote   |
+| `GATEWAY_JWT_SECRET` | required          | Signs per-run gateway credentials (16+)  |
 | `RUNTIME_PROVIDER`   | `local-process`   | `container` for disposable local Runtime |
 | `CODEX_SANDBOX_MODE` | `workspace-write` | Codex inner sandbox mode                 |
 | `CODEX_TIMEOUT_MS`   | `600000`          | Max duration of one turn                 |
@@ -188,7 +189,16 @@ carries the summary table. Key variables:
 `config.ts` runs every path through `path.resolve`. This is why tests must not
 hardcode POSIX paths — see the platform note under Testing.
 
-The gateway introduces **no new environment variable**. It does change who
+`GATEWAY_JWT_SECRET` is the gateway's HS256 signing key for per-run
+credentials. It is **required**: `loadConfig` throws when it is missing, under
+16 characters, or still the `replace-` placeholder, because a gateway that
+cannot verify a credential must not start rather than accept unverified agent
+calls. It never leaves the server process — not into a token, a log line, an
+error body, or a runner environment. `npm run poc` mints an ephemeral secret
+for the run when none is configured; `npm run dev` reads the process
+environment, so export one there.
+
+The gateway also changes who
 writes Codex's `config.toml`: the **active runner** writes it when constructed,
 not server startup, because the gateway origin depends on the runner's vantage
 point — `http://127.0.0.1:<PORT>/gateway/v1` for the host process,

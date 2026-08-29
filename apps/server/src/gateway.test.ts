@@ -79,6 +79,7 @@ describe("Model gateway", () => {
     const app = await createApp(
       loadConfig({
         NODE_ENV: "test",
+        GATEWAY_JWT_SECRET: "gateway-test-signing-secret",
         ARK_API_KEY: ARK_KEY,
         ARK_MODEL: "ep-test",
         ARK_BASE_URL: upstream.baseUrl,
@@ -119,6 +120,7 @@ describe("Model gateway", () => {
     const app = await createApp(
       loadConfig({
         NODE_ENV: "test",
+        GATEWAY_JWT_SECRET: "gateway-test-signing-secret",
         ARK_API_KEY: ARK_KEY,
         ARK_MODEL: "ep-test",
         ARK_BASE_URL: upstream.baseUrl,
@@ -148,6 +150,7 @@ describe("Model gateway", () => {
     const app = await createApp(
       loadConfig({
         NODE_ENV: "test",
+        GATEWAY_JWT_SECRET: "gateway-test-signing-secret",
         APP_AUTH_TOKEN: "a-strong-test-token",
         ARK_API_KEY: ARK_KEY,
         ARK_MODEL: "ep-test",
@@ -185,6 +188,7 @@ describe("Model gateway", () => {
     const app = await createApp(
       loadConfig({
         NODE_ENV: "test",
+        GATEWAY_JWT_SECRET: "gateway-test-signing-secret",
         ARK_API_KEY: ARK_KEY,
         ARK_MODEL: "ep-test",
         ARK_BASE_URL: `http://127.0.0.1:${port}`,
@@ -233,6 +237,7 @@ describe("Model gateway", () => {
     const app = await createApp(
       loadConfig({
         NODE_ENV: "test",
+        GATEWAY_JWT_SECRET: "gateway-test-signing-secret",
         ARK_API_KEY: ARK_KEY,
         ARK_MODEL: "ep-test",
         ARK_BASE_URL: upstream.baseUrl,

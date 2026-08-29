@@ -101,6 +101,7 @@ describe("Local Codex runner credentials and config", () => {
   it("keeps the Ark key out of the Codex process environment", async () => {
     const config = loadConfig({
       NODE_ENV: "test",
+      GATEWAY_JWT_SECRET: "gateway-test-signing-secret",
       ARK_API_KEY: "secret-that-must-not-reach-codex",
       ARK_MODEL: "ep-test",
       CODEX_HOME: await temporaryCodexHome(),
@@ -117,6 +118,7 @@ describe("Local Codex runner credentials and config", () => {
     const codexHome = await temporaryCodexHome();
     const config = loadConfig({
       NODE_ENV: "test",
+      GATEWAY_JWT_SECRET: "gateway-test-signing-secret",
       ARK_API_KEY: "secret-that-must-not-reach-codex",
       ARK_MODEL: "ep-test",
       CODEX_HOME: codexHome,

@@ -47,6 +47,8 @@ const envSchema = z.object({
     .max(128)
     .regex(/^[A-Za-z0-9._~-]*$/, "APP_AUTH_TOKEN must use URL-safe characters")
     .optional(),
+  // Validated after parsing so a rejection never echoes the value.
+  GATEWAY_JWT_SECRET: z.string().default(""),
   ARK_API_KEY: z.string().optional(),
   ARK_MODEL: z.string().optional(),
   ARK_BASE_URL: z
@@ -60,6 +62,9 @@ const envSchema = z.object({
 
 export type AppConfig = ReturnType<typeof loadConfig>;
 
+/** Short enough to type for a demo, long enough to be worth HMAC-signing with. */
+const MINIMUM_GATEWAY_JWT_SECRET_LENGTH = 16;
+
 export function loadConfig(environment: NodeJS.ProcessEnv = process.env) {
   const env = envSchema.parse(environment);
   const authToken = env.APP_AUTH_TOKEN?.trim() ?? "";
@@ -70,6 +75,22 @@ export function loadConfig(environment: NodeJS.ProcessEnv = process.env) {
         "APP_AUTH_TOKEN must contain at least 24 characters for a non-loopback production server",
       );
     }
+  }
+  // The gateway signs and verifies every per-run credential with this secret.
+  // Booting without one would leave the gateway unable to verify anything, so
+  // it is a startup error rather than a silent bypass. The message names the
+  // variable and never repeats the rejected value.
+  const gatewayJwtSecret = env.GATEWAY_JWT_SECRET.trim();
+  if (
+    gatewayJwtSecret.length < MINIMUM_GATEWAY_JWT_SECRET_LENGTH ||
+    gatewayJwtSecret.startsWith("replace-")
+  ) {
+    throw new Error(
+      "GATEWAY_JWT_SECRET must be set to at least " +
+        MINIMUM_GATEWAY_JWT_SECRET_LENGTH +
+        " random characters. The Agent Access Gateway signs every per-run " +
+        "credential with it and refuses to start without one.",
+    );
   }
   const defaultContainerUser =
     typeof process.getuid === "function" && typeof process.getgid === "function"
@@ -95,6 +116,7 @@ export function loadConfig(environment: NodeJS.ProcessEnv = process.env) {
     containerUser: env.CONTAINER_USER?.trim() || defaultContainerUser,
     runtimeInstanceId: env.RUNTIME_INSTANCE_ID,
     authToken,
+    gatewayJwtSecret,
     arkApiKey: env.ARK_API_KEY?.trim() ?? "",
     arkModel: env.ARK_MODEL?.trim() ?? "",
     arkBaseUrl: env.ARK_BASE_URL.replace(/\/+$/, ""),

@@ -11,7 +11,11 @@ const service = {
 describe("HTTP boundary", () => {
   it("protects API routes with the configured shared token", async () => {
     const app = await createApp(
-      loadConfig({ NODE_ENV: "test", APP_AUTH_TOKEN: "a-strong-test-token" }),
+      loadConfig({
+        NODE_ENV: "test",
+        GATEWAY_JWT_SECRET: "gateway-test-signing-secret",
+        APP_AUTH_TOKEN: "a-strong-test-token",
+      }),
       service,
     );
     const denied = await app.inject({ method: "GET", url: "/api/agents" });
@@ -27,7 +31,13 @@ describe("HTTP boundary", () => {
   });
 
   it("preserves Fastify client error status codes", async () => {
-    const app = await createApp(loadConfig({ NODE_ENV: "test" }), service);
+    const app = await createApp(
+      loadConfig({
+        NODE_ENV: "test",
+        GATEWAY_JWT_SECRET: "gateway-test-signing-secret",
+      }),
+      service,
+    );
     const malformed = await app.inject({
       method: "POST",
       url: "/api/agents",

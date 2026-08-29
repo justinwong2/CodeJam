@@ -98,7 +98,12 @@ PUBLIC_PORT=80
 ARK_API_KEY=your-ark-api-key
 ARK_MODEL=ep-your-endpoint-id
 APP_AUTH_TOKEN=the-random-token-generated-above
+GATEWAY_JWT_SECRET=a-second-value-from-openssl-rand-hex-32
 ```
+
+`GATEWAY_JWT_SECRET` signs the per-run credential the Agent Runtime holds. The
+server refuses to start without it, so generate a second random value rather
+than reusing the browser token.
 
 Deploy:
 
