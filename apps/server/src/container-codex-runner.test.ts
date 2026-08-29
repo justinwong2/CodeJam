@@ -37,6 +37,7 @@ describe("Container Codex runner", () => {
         workspacePath: "/tmp/agent-workspace",
         prompt: "write a small program",
         threadId: null,
+        runJwt: "run-jwt-for-this-test",
       },
       config,
     );
@@ -70,6 +71,7 @@ describe("Container Codex runner", () => {
         workspacePath: "/tmp/workspace",
         prompt: "continue",
         threadId: "thread-123",
+        runJwt: "run-jwt-for-this-test",
       },
       config,
     );
@@ -93,6 +95,7 @@ describe("Container Codex runner", () => {
         workspacePath: "/tmp/workspace",
         prompt: "hello",
         threadId: null,
+        runJwt: "run-jwt-for-this-test",
       },
       config,
     );
@@ -104,12 +107,14 @@ describe("Container Codex runner", () => {
     expect(args).toContain("--add-host");
     expect(args).toContain("host.docker.internal:host-gateway");
 
-    const environment = buildEngineEnvironment();
+    const environment = buildEngineEnvironment("run-jwt-for-this-test");
     expect(environment.ARK_API_KEY).toBeUndefined();
     expect(Object.values(environment)).not.toContain(
       "secret-that-must-not-appear-in-argv",
     );
-    expect(environment[RUN_JWT_ENV_KEY]).toBeTruthy();
+    // The engine holds the run's own credential, and only for a real run.
+    expect(environment[RUN_JWT_ENV_KEY]).toBe("run-jwt-for-this-test");
+    expect(buildEngineEnvironment()[RUN_JWT_ENV_KEY]).toBeUndefined();
   });
 
   it("leaves the host-gateway shim off Podman, which supplies its own alias", () => {
@@ -126,6 +131,7 @@ describe("Container Codex runner", () => {
         workspacePath: "/tmp/workspace",
         prompt: "hello",
         threadId: null,
+        runJwt: "run-jwt-for-this-test",
       },
       config,
     );

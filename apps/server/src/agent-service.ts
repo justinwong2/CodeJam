@@ -2,20 +2,45 @@ import { randomUUID } from "node:crypto";
 import type { AppConfig } from "./config.js";
 import { isArkConfigured } from "./config.js";
 import { HttpError, RunCancelledError } from "./errors.js";
+import { signRunJwt } from "./run-jwt.js";
 import { JsonStore } from "./store.js";
+import { DEFAULT_OWNER_ID } from "./types.js";
 import type {
   Agent,
   AgentRun,
   AgentRunner,
   CreateAgentInput,
+  Database,
   Message,
+  RunSession,
+  RunSessionDirectory,
   UpdateAgentInput,
 } from "./types.js";
 import { WorkspaceManager } from "./workspace.js";
 
 const now = () => new Date().toISOString();
 
-export class AgentService {
+/**
+ * A session outlives the turn it authorizes by this much. A model call already
+ * in flight when `CODEX_TIMEOUT_MS` elapses must not be denied mid-stream while
+ * the runner is still tearing the turn down.
+ */
+const SESSION_EXPIRY_MARGIN_MS = 60_000;
+
+/** Ends a run's sessions where they stand, without pretending they were revoked. */
+function expireRunSessions(
+  database: Database,
+  runId: string,
+  at: string,
+): void {
+  for (const session of database.sessions) {
+    if (session.runId === runId && session.expiresAt > at) {
+      session.expiresAt = at;
+    }
+  }
+}
+
+export class AgentService implements RunSessionDirectory {
   private readonly activeExecutions = new Map<string, Promise<void>>();
   private readonly cancellationRequests = new Set<string>();
 
@@ -30,11 +55,21 @@ export class AgentService {
     await this.store.initialize();
     await this.workspaces.initialize();
     await this.store.mutate((database) => {
+      const interrupted = new Set<string>();
       for (const run of database.runs) {
         if (run.status === "queued" || run.status === "running") {
           run.status = "cancelled";
           run.error = "Server restarted while this run was active";
           run.completedAt = now();
+          interrupted.add(run.id);
+        }
+      }
+      // Nothing is executing those runs any more, so any credential still in a
+      // Runtime container from before the restart is now a credential nobody
+      // is supervising. Revoke rather than wait for expiry.
+      for (const session of database.sessions) {
+        if (interrupted.has(session.runId)) {
+          session.revoked = true;
         }
       }
       for (const agent of database.agents) {
@@ -121,6 +156,9 @@ export class AgentService {
         (item) => item.agentId !== id,
       );
       database.runs = database.runs.filter((item) => item.agentId !== id);
+      database.sessions = database.sessions.filter(
+        (item) => item.agentId !== id,
+      );
     });
     return { archivedWorkspace };
   }
@@ -191,6 +229,27 @@ export class AgentService {
       content: prompt,
       createdAt: timestamp,
     };
+    // The run's identity, minted before the run is admitted so the session and
+    // the run become visible in the same write: a token can never name a run
+    // the store has not accepted.
+    const expiresAtMs =
+      Date.now() + this.config.codexTimeoutMs + SESSION_EXPIRY_MARGIN_MS;
+    const session: RunSession = {
+      runId,
+      agentId,
+      ownerId: DEFAULT_OWNER_ID,
+      jwtId: randomUUID(),
+      revoked: false,
+      createdAt: timestamp,
+      expiresAt: new Date(expiresAtMs).toISOString(),
+    };
+    const runJwt = signRunJwt(this.config.gatewayJwtSecret, {
+      jti: session.jwtId,
+      agentId,
+      ownerId: session.ownerId,
+      runId,
+      exp: Math.floor(expiresAtMs / 1_000),
+    });
     const agentAtStart = await this.store.mutate((database) => {
       const storedAgent = database.agents.find((item) => item.id === agentId);
       if (!storedAgent) {
@@ -204,13 +263,14 @@ export class AgentService {
       }
       database.runs.push(run);
       database.messages.push(message);
+      database.sessions.push(session);
       const snapshot = structuredClone(storedAgent);
       storedAgent.status = "busy";
       storedAgent.lastError = null;
       storedAgent.updatedAt = timestamp;
       return snapshot;
     });
-    const execution = this.executeRun(agentAtStart, run);
+    const execution = this.executeRun(agentAtStart, run, runJwt);
     this.activeExecutions.set(agentId, execution);
     void execution
       .finally(() => {
@@ -241,7 +301,24 @@ export class AgentService {
     };
   }
 
-  private async executeRun(agentAtStart: Agent, run: AgentRun): Promise<void> {
+  /** The live session behind a run credential, looked up by its `jti`. */
+  findRunSession(jwtId: string): RunSession | undefined {
+    return this.store.select((database) =>
+      database.sessions.find((session) => session.jwtId === jwtId),
+    );
+  }
+
+  listRunSessions(agentId: string): RunSession[] {
+    return this.store.select((database) =>
+      database.sessions.filter((session) => session.agentId === agentId),
+    );
+  }
+
+  private async executeRun(
+    agentAtStart: Agent,
+    run: AgentRun,
+    runJwt: string,
+  ): Promise<void> {
     await this.store.mutate((database) => {
       const storedRun = database.runs.find((item) => item.id === run.id);
       if (storedRun) {
@@ -258,9 +335,11 @@ export class AgentService {
         workspacePath: agentAtStart.workspacePath,
         prompt: run.prompt,
         threadId: agentAtStart.codexThreadId,
+        runJwt,
       });
       const completedAt = now();
       await this.store.mutate((database) => {
+        expireRunSessions(database, run.id, completedAt);
         const storedRun = database.runs.find((item) => item.id === run.id);
         const agent = database.agents.find(
           (item) => item.id === agentAtStart.id,
@@ -288,6 +367,7 @@ export class AgentService {
       const cancelled = error instanceof RunCancelledError;
       const message = error instanceof Error ? error.message : String(error);
       await this.store.mutate((database) => {
+        expireRunSessions(database, run.id, completedAt);
         const storedRun = database.runs.find((item) => item.id === run.id);
         const agent = database.agents.find(
           (item) => item.id === agentAtStart.id,

@@ -98,6 +98,17 @@ export interface RunnerRequest {
   workspacePath: string;
   prompt: string;
   threadId: string | null;
+  /** The run's gateway credential. It reaches Codex as `RUN_JWT`. */
+  runJwt: string;
+}
+
+/**
+ * What the gateway needs from the control plane to trust a run credential.
+ * Narrower than `AgentService` on purpose: the gateway resolves sessions and
+ * decides nothing about Run state.
+ */
+export interface RunSessionDirectory {
+  findRunSession(jwtId: string): RunSession | undefined;
 }
 
 export interface AgentRunner {

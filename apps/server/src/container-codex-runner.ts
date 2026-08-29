@@ -3,11 +3,7 @@ import { promisify } from "node:util";
 import { writeCodexConfig, type AppConfig } from "./config.js";
 import { buildCodexArgs, parseCodexEventLine } from "./codex-runner.js";
 import { RunCancelledError } from "./errors.js";
-import {
-  gatewayBaseUrl,
-  RUN_JWT_ENV_KEY,
-  RUN_JWT_PLACEHOLDER,
-} from "./gateway.js";
+import { gatewayBaseUrl, RUN_JWT_ENV_KEY } from "./gateway.js";
 import type {
   AgentRunner,
   RunUsage,
@@ -57,11 +53,12 @@ export function containerHostAlias(containerEngine: string): string {
 /**
  * The container-engine process environment. It carries the run credential that
  * `--env RUN_JWT` forwards into the Runtime by name, so no credential value
- * ever appears in argv. The Ark key is not here at all.
+ * ever appears in argv. The Ark key is not here at all. `runJwt` is omitted for
+ * engine commands that start no Runtime, such as `version` and `rm`.
  */
-export function buildEngineEnvironment(): NodeJS.ProcessEnv {
+export function buildEngineEnvironment(runJwt?: string): NodeJS.ProcessEnv {
   const environment: NodeJS.ProcessEnv = {
-    [RUN_JWT_ENV_KEY]: RUN_JWT_PLACEHOLDER,
+    ...(runJwt ? { [RUN_JWT_ENV_KEY]: runJwt } : {}),
     NO_COLOR: "1",
   };
   for (const name of [
@@ -218,7 +215,7 @@ export class ContainerCodexRunner implements AgentRunner {
       buildContainerRunArgs(request, this.config),
       {
         cwd: request.workspacePath,
-        env: this.childEnvironment(),
+        env: this.childEnvironment(request.runJwt),
         stdio: ["ignore", "pipe", "pipe"],
       },
     );
@@ -312,7 +309,7 @@ export class ContainerCodexRunner implements AgentRunner {
     }
   }
 
-  private childEnvironment(): NodeJS.ProcessEnv {
-    return buildEngineEnvironment();
+  private childEnvironment(runJwt?: string): NodeJS.ProcessEnv {
+    return buildEngineEnvironment(runJwt);
   }
 }

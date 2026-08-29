@@ -3,11 +3,7 @@ import { spawn, type ChildProcess } from "node:child_process";
 import { promisify } from "node:util";
 import { writeCodexConfig, type AppConfig } from "./config.js";
 import { RunCancelledError } from "./errors.js";
-import {
-  gatewayBaseUrl,
-  RUN_JWT_ENV_KEY,
-  RUN_JWT_PLACEHOLDER,
-} from "./gateway.js";
+import { gatewayBaseUrl, RUN_JWT_ENV_KEY } from "./gateway.js";
 import type {
   AgentRunner,
   RunUsage,
@@ -102,8 +98,12 @@ export function parseCodexEventLine(line: string, parsed: ParsedEvents): void {
 /**
  * The Codex process environment. It carries the run credential the gateway
  * expects and never the upstream Ark key, which stays in the server process.
+ * `runJwt` is omitted for probes such as `codex --version`, which call no model.
  */
-export function buildCodexEnvironment(config: AppConfig): NodeJS.ProcessEnv {
+export function buildCodexEnvironment(
+  config: AppConfig,
+  runJwt?: string,
+): NodeJS.ProcessEnv {
   const inheritedNames = [
     "PATH",
     "HOME",
@@ -120,7 +120,7 @@ export function buildCodexEnvironment(config: AppConfig): NodeJS.ProcessEnv {
   ] as const;
   const environment: NodeJS.ProcessEnv = {
     CODEX_HOME: config.codexHome,
-    [RUN_JWT_ENV_KEY]: RUN_JWT_PLACEHOLDER,
+    ...(runJwt ? { [RUN_JWT_ENV_KEY]: runJwt } : {}),
     NO_COLOR: "1",
   };
   for (const name of inheritedNames) {
@@ -192,7 +192,7 @@ export class CodexRunner implements AgentRunner {
     const args = buildCodexArgs(request, this.config.codexSandboxMode);
     const child = spawn(this.config.codexBin, args, {
       cwd: request.workspacePath,
-      env: this.childEnvironment(),
+      env: this.childEnvironment(request.runJwt),
       stdio: ["ignore", "pipe", "pipe"],
     });
     const settled = new Promise<void>((resolve) => {
@@ -306,7 +306,7 @@ export class CodexRunner implements AgentRunner {
     }
   }
 
-  private childEnvironment(): NodeJS.ProcessEnv {
-    return buildCodexEnvironment(this.config);
+  private childEnvironment(runJwt?: string): NodeJS.ProcessEnv {
+    return buildCodexEnvironment(this.config, runJwt);
   }
 }

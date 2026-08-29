@@ -14,11 +14,6 @@ export const GATEWAY_PREFIX = "/gateway/v1";
 // upstream key.
 export const RUN_JWT_ENV_KEY = "RUN_JWT";
 
-// Slice 1 mints no tokens and the gateway verifies none. This constant keeps
-// the plumbing honest until the session model replaces it, and is deliberately
-// not a secret.
-export const RUN_JWT_PLACEHOLDER = "placeholder-until-slice-2";
-
 /** Where an agent on `host` reaches this server's gateway routes. */
 export function gatewayBaseUrl(host: string, port: number): string {
   return `http://${host}:${port}${GATEWAY_PREFIX}`;

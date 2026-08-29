@@ -39,6 +39,7 @@ const request: RunnerRequest = {
   workspacePath: os.tmpdir(),
   prompt: "hello",
   threadId: null,
+  runJwt: "run-jwt-for-this-test",
 };
 
 function completeRun(child: FakeCodexProcess): void {

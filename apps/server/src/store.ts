@@ -77,6 +77,15 @@ export class JsonStore {
     return structuredClone(this.data);
   }
 
+  /**
+   * A cloned projection of the current state. The gateway resolves a session on
+   * every agent call and must not pay for a copy of every stored message to do
+   * it, which a full `snapshot()` would cost.
+   */
+  select<T>(selector: (database: Database) => T): T {
+    return structuredClone(selector(this.data));
+  }
+
   async mutate<T>(
     mutation: (database: Database) => T | Promise<T>,
   ): Promise<T> {

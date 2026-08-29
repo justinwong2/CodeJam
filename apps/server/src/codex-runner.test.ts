@@ -19,6 +19,7 @@ describe("Codex runner protocol", () => {
         workspacePath: "/tmp/workspace",
         prompt: "build a calculator",
         threadId: null,
+        runJwt: "run-jwt-for-this-test",
       },
       "workspace-write",
     );
@@ -41,6 +42,7 @@ describe("Codex runner protocol", () => {
         workspacePath: "/tmp/workspace",
         prompt: "add tests",
         threadId: "thread-123",
+        runJwt: "run-jwt-for-this-test",
       },
       "workspace-write",
     );
@@ -106,12 +108,14 @@ describe("Local Codex runner credentials and config", () => {
       ARK_MODEL: "ep-test",
       CODEX_HOME: await temporaryCodexHome(),
     });
-    const environment = buildCodexEnvironment(config);
+    const environment = buildCodexEnvironment(config, "run-jwt-for-this-test");
     expect(environment.ARK_API_KEY).toBeUndefined();
     expect(Object.values(environment)).not.toContain(
       "secret-that-must-not-reach-codex",
     );
-    expect(environment[RUN_JWT_ENV_KEY]).toBeTruthy();
+    // Codex holds the run's own credential, and only for a real run.
+    expect(environment[RUN_JWT_ENV_KEY]).toBe("run-jwt-for-this-test");
+    expect(buildCodexEnvironment(config)[RUN_JWT_ENV_KEY]).toBeUndefined();
   });
 
   it("points Codex at the loopback gateway", async () => {
