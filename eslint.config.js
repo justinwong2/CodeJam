@@ -41,6 +41,14 @@ export default tseslint.config(
     },
   },
 
+  // Repo scripts: plain Node ESM launchers, Node globals.
+  {
+    files: ["scripts/**/*.mjs"],
+    languageOptions: {
+      globals: globals.node,
+    },
+  },
+
   // Web: React 19 + Vite, browser globals.
   {
     files: ["apps/web/**/*.{ts,tsx}"],

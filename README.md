@@ -73,8 +73,20 @@ ARK_MODEL=ep-your-endpoint-id \
 npm run poc
 ```
 
+Or put `ARK_API_KEY` and `ARK_MODEL` in `.env` and run `npm run poc` on its
+own. Only the credentials are read from `.env`; the POC sets its own runtime
+configuration and ignores the Compose values for `HOST`, `RUNTIME_PROVIDER`,
+and the state directories.
+
 The first run installs Node.js dependencies and builds the Runtime image. The
 script automatically selects Docker, Colima, or Podman.
+
+**Windows.** `npm run poc` works from PowerShell, Command Prompt, or Windows
+Terminal — the terminal does not matter, because npm runs package scripts
+through `cmd.exe` either way. What is required is **Git for Windows**, whose
+Git Bash runs the POC script; `npm run poc` locates it automatically and does
+not use WSL bash. Put the credentials in `.env`, since PowerShell cannot use
+the `VAR=value command` form above. State lives in `.local/`.
 
 ### 4. Open the browser
 
