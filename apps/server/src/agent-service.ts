@@ -349,6 +349,21 @@ export class AgentService implements GatewayDirectory {
   }
 
   /**
+   * One Run's evidence trail, oldest first. Scoped to the Run because that is
+   * how it is read: beside the conversation it explains. A Run nobody started
+   * is a 404 rather than an empty trail — an operator asking about the wrong
+   * Run should be told so, not shown silence that looks like innocence.
+   */
+  getRunAudit(runId: string): AuditRecord[] {
+    this.getRun(runId);
+    return this.store
+      .select((database) =>
+        database.audit.filter((record) => record.runId === runId),
+      )
+      .sort((left, right) => left.ts.localeCompare(right.ts));
+  }
+
+  /**
    * Files one gateway decision. The gateway awaits this before it answers, so
    * an agent never learns the outcome of a call the store has not recorded.
    */

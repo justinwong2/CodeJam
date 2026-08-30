@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -6,7 +7,7 @@ import { AgentService } from "./agent-service.js";
 import { createApp } from "./app.js";
 import { loadConfig } from "./config.js";
 import { JsonStore, SEED_USERS } from "./store.js";
-import type { Agent, AgentRunner } from "./types.js";
+import type { Agent, AgentRunner, AuditRecord } from "./types.js";
 import { WorkspaceManager } from "./workspace.js";
 
 const service = {
@@ -131,6 +132,98 @@ describe("HTTP boundary", () => {
   });
 });
 
+describe("Run audit trail", () => {
+  /** A finished Run, so there is something for evidence to hang on. */
+  async function runFor(
+    app: Awaited<ReturnType<typeof appWithStore>>["app"],
+    backing: AgentService,
+  ): Promise<string> {
+    const created = await createAgentAs(app, "user-a", "Audited");
+    const started = await app.inject({
+      method: "POST",
+      url: `/api/agents/${created.agent?.id}/messages`,
+      payload: { content: "do something worth recording" },
+    });
+    expect(started.statusCode).toBe(202);
+    const runId = (started.json() as { run: { id: string } }).run.id;
+    await expect.poll(() => backing.getRun(runId).status).toBe("completed");
+    return runId;
+  }
+
+  const record = (
+    runId: string,
+    ts: string,
+    resource: string,
+  ): AuditRecord => ({
+    id: randomUUID(),
+    ts,
+    humanId: "user-a",
+    agentId: "agent-1",
+    runId,
+    tool: "docs",
+    resource,
+    decision: "allow",
+    reason: 'Role "admin" grants the docs tool',
+  });
+
+  it("returns one Run's records in the order they happened", async () => {
+    const { app, service: backing } = await appWithStore();
+    const runId = await runFor(app, backing);
+    const otherRunId = randomUUID();
+
+    // Written out of order on purpose: the endpoint orders by `ts`, so a
+    // reader never has to reconstruct the sequence themselves.
+    await backing.appendAuditRecord(
+      record(runId, "2026-08-29T10:00:02.000Z", "docs/doc-a2"),
+    );
+    await backing.appendAuditRecord(
+      record(runId, "2026-08-29T10:00:01.000Z", "docs/doc-a1"),
+    );
+    await backing.appendAuditRecord(
+      record(otherRunId, "2026-08-29T10:00:00.000Z", "docs/doc-b1"),
+    );
+
+    const response = await app.inject({
+      method: "GET",
+      url: `/api/runs/${runId}/audit`,
+    });
+
+    expect(response.statusCode).toBe(200);
+    const audit = (response.json() as { audit: AuditRecord[] }).audit;
+    expect(audit.map((entry) => entry.resource)).toEqual([
+      "docs/doc-a1",
+      "docs/doc-a2",
+    ]);
+    // Another Run's evidence belongs to that Run, not to this one.
+    expect(audit.every((entry) => entry.runId === runId)).toBe(true);
+    await app.close();
+  });
+
+  it("answers an empty trail for a Run that decided nothing", async () => {
+    const { app, service: backing } = await appWithStore();
+    const runId = await runFor(app, backing);
+
+    const response = await app.inject({
+      method: "GET",
+      url: `/api/runs/${runId}/audit`,
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toEqual({ audit: [] });
+    await app.close();
+  });
+
+  it("answers 404 for a Run nobody ever started", async () => {
+    const { app } = await appWithStore();
+    const response = await app.inject({
+      method: "GET",
+      url: `/api/runs/${randomUUID()}/audit`,
+    });
+    expect(response.statusCode).toBe(404);
+    await app.close();
+  });
+});
+
 describe("Acting user", () => {
   it("lists the seeded users for the switcher", async () => {
     const { app } = await appWithStore();
@@ -192,6 +285,25 @@ describe("Acting user", () => {
       headers: { "x-launchpad-user": ["user-a", "user-b"] },
     });
     expect(response.statusCode).toBe(400);
+    await app.close();
+  });
+
+  it("keeps the audit trail on the guarded side of the token hook", async () => {
+    const app = await createApp(
+      loadConfig({
+        NODE_ENV: "test",
+        GATEWAY_JWT_SECRET: "gateway-test-signing-secret",
+        APP_AUTH_TOKEN: "a-strong-test-token",
+      }),
+      service,
+    );
+    // The evidence names humans, Agents, and what they were refused. It is the
+    // operator's to read, and no more anonymous than the rest of /api.
+    const response = await app.inject({
+      method: "GET",
+      url: "/api/runs/00000000-0000-4000-8000-000000000000/audit",
+    });
+    expect(response.statusCode).toBe(401);
     await app.close();
   });
 

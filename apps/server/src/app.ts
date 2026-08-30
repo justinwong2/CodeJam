@@ -193,6 +193,13 @@ export async function createApp(
     return { run: service.getRun(id) };
   });
 
+  // What the gateway decided during this Run, and why. Under /api like every
+  // browser route: the evidence is the operator's to read, never the Agent's.
+  app.get("/api/runs/:id/audit", async (request) => {
+    const { id } = runIdParams.parse(request.params);
+    return { audit: service.getRunAudit(id) };
+  });
+
   if (config.nodeEnv === "production") {
     const webRoot = fileURLToPath(new URL("../../web/dist", import.meta.url));
     await app.register(fastifyStatic, {
