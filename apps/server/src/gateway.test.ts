@@ -872,21 +872,75 @@ describe("Tool gateway", () => {
     expect(fixture.toolCalls).toEqual([]);
   });
 
-  it("denies one owner's Agent another owner's document, leaving it untouched", async () => {
+  it("makes another owner's private document indistinguishable from a nonexistent one", async () => {
+    // The ADR's verification, as an assertion: an agent that guesses ids must
+    // not be able to tell a wrong guess from a forbidden hit, or it can map
+    // other humans' documents without ever reading one.
     const fixture = await toolFixture();
     const before = fixture.service.findMockDoc("doc-a1");
     const runJwt = await fixture.runAs("user-b");
 
-    const response = await callTool(fixture.app, runJwt, "docs/doc-a1");
+    const denied = await callTool(fixture.app, runJwt, "docs/doc-a1");
+    const missing = await callTool(fixture.app, runJwt, "docs/doc-zzz");
 
-    expect(response.statusCode).toBe(403);
-    expect((response.json() as { error: string }).error).toContain(
-      "resource owned by user-a",
+    // Byte-identical, not merely equivalent: the same status, the same bytes.
+    expect(denied.statusCode).toBe(404);
+    expect(missing.statusCode).toBe(404);
+    expect(denied.body).toBe(missing.body);
+    expect(denied.body).toBe('{"error":"Document not found"}');
+    expect(denied.headers["content-type"]).toBe(
+      missing.headers["content-type"],
     );
+
+    // Fails closed twice over: nothing was forwarded on either call, and the
+    // document the answer denies the existence of is exactly as it was.
     expect(fixture.toolCalls).toEqual([]);
-    // Neither the content nor the stored record crossed the boundary.
-    expect(response.body).not.toContain("quarterly plan");
     expect(fixture.service.findMockDoc("doc-a1")).toEqual(before);
+    expect(denied.body).not.toContain("quarterly plan");
+    expect(denied.body).not.toContain("user-a");
+  });
+
+  it("tells the operator the truth it did not tell the agent", async () => {
+    const fixture = await toolFixture();
+    const runJwt = await fixture.runAs("user-b");
+
+    await callTool(fixture.app, runJwt, "docs/doc-a1");
+    await callTool(fixture.app, runJwt, "docs/doc-zzz");
+
+    // Same answer to the agent, different rows in the evidence: the ownership
+    // denial names the owner it protected, the wrong guess says what it was.
+    const records = fixture.audit(fixture.runIds[0] ?? "");
+    expect(records).toHaveLength(2);
+    expect(records[0]).toMatchObject({
+      tool: "docs",
+      resource: "docs/doc-a1",
+      decision: "deny",
+    });
+    expect(records[0]?.reason).toContain("resource owned by user-a");
+    expect(records[1]).toMatchObject({
+      tool: "docs",
+      resource: "docs/doc-zzz",
+      decision: "deny",
+      reason: "Document not found",
+    });
+    // Evidence about a decision, never a copy of what was protected.
+    expect(JSON.stringify(records)).not.toContain("quarterly plan");
+  });
+
+  it("lets any granted role read a public document it does not own", async () => {
+    const fixture = await toolFixture();
+    const runJwt = await fixture.runAs("user-b");
+
+    const response = await callTool(fixture.app, runJwt, "docs/kb-1");
+
+    expect(response.statusCode).toBe(200);
+    const doc = (response.json() as { doc: { ownerId: string } }).doc;
+    // Public widens who may read it and leaves ownership exactly where it was.
+    expect(doc.ownerId).toBe("user-a");
+    expect(fixture.toolCalls).toEqual(["/internal/tools/docs/kb-1"]);
+    expect(fixture.audit(fixture.runIds[0] ?? "")).toMatchObject([
+      { tool: "docs", resource: "docs/kb-1", decision: "allow" },
+    ]);
   });
 
   it("lets an owner read their own document", async () => {
@@ -975,7 +1029,8 @@ describe("Tool gateway", () => {
 
     const response = await callTool(fixture.app, runJwt, "docs/doc-a1");
 
-    expect(response.statusCode).toBe(403);
+    // 404 to the agent, `deny` with the real reason to the operator.
+    expect(response.statusCode).toBe(404);
     const records = fixture.audit(fixture.runIds[0] ?? "");
     expect(records).toHaveLength(1);
     expect(records[0]).toMatchObject({

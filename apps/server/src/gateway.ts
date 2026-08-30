@@ -35,6 +35,16 @@ export function gatewayBaseUrl(host: string, port: number): string {
   return `http://${host}:${port}${GATEWAY_PREFIX}`;
 }
 
+/**
+ * The one answer a `docs` call gets for a document it may not read — whether
+ * the id names nothing at all or names something owned by somebody else. Both
+ * paths send this exact body, so a caller enumerating ids collects a uniform
+ * wall of 404s and learns neither which documents exist nor who owns them. The
+ * true reason is written to the audit trail instead; see
+ * docs/adr/2026-08-30-invisible-documents.md.
+ */
+const DOCUMENT_NOT_FOUND = "Document not found";
+
 // A model call carries the whole conversation, so the app-level 1 MiB body
 // limit is far too small for this scope.
 const GATEWAY_BODY_LIMIT = 33_554_432;
@@ -360,7 +370,7 @@ function resolveResource(
   if (!doc) {
     // Answered before the tool service is called: there is no owner to compare
     // against, so there is no authorization question that could come out well.
-    return { ok: false, status: 404, error: "Document not found" };
+    return { ok: false, status: 404, error: DOCUMENT_NOT_FOUND };
   }
   return {
     ok: true,
@@ -481,15 +491,29 @@ async function proxyTool(
   if (target.resource) {
     const ownershipDecision = can(principal, tool, target.resource);
     if (!ownershipDecision.allow) {
-      return deny(
-        audit,
-        request,
-        reply,
-        principal,
-        tool,
-        resource,
-        ownershipDecision.reason,
-      );
+      // A document the principal may not read is *invisible*, not merely
+      // refused: the agent gets the same answer a nonexistent id gets, and the
+      // record gets the reason. Every other tool's denial names a tool rather
+      // than a resource, so it discloses nothing and stays a 403.
+      return tool === "docs"
+        ? invisible(
+            audit,
+            request,
+            reply,
+            principal,
+            tool,
+            resource,
+            ownershipDecision.reason,
+          )
+        : deny(
+            audit,
+            request,
+            reply,
+            principal,
+            tool,
+            resource,
+            ownershipDecision.reason,
+          );
     }
     allowed = ownershipDecision.reason;
   }
@@ -526,6 +550,30 @@ async function deny(
   );
   await recordDenial(audit, request, identity, tool, resource, reason);
   return reply.code(403).send({ error: reason });
+}
+
+/**
+ * An ownership denial on a document, answered as absence. The record carries
+ * the real reason and the caller carries none of it: same status, same bytes,
+ * same content type as the unknown-id branch above, so the pair is not a
+ * one-bit existence oracle. The two deliberately diverge — the agent learns
+ * nothing, the operator learns everything.
+ */
+async function invisible(
+  audit: AuditLog,
+  request: FastifyRequest,
+  reply: FastifyReply,
+  identity: AuditIdentity,
+  tool: ToolName,
+  resource: string | null,
+  reason: string,
+): Promise<FastifyReply> {
+  request.log.warn(
+    { reason, tool },
+    "Gateway denied an agent call and answered as if the document did not exist",
+  );
+  await recordDenial(audit, request, identity, tool, resource, reason);
+  return reply.code(404).send({ error: DOCUMENT_NOT_FOUND });
 }
 
 /**
