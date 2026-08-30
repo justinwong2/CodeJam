@@ -2,7 +2,7 @@ import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { once } from "node:events";
 import { PassThrough } from "node:stream";
 import { AuditLog, type AuditIdentity } from "./audit.js";
-import { can } from "./authz.js";
+import { can, type OwnedResource } from "./authz.js";
 import type { AppConfig } from "./config.js";
 import {
   MOCK_TOOLS_PREFIX,
@@ -337,13 +337,14 @@ function resolvePrincipal(
 }
 
 type ResourceResolution =
-  | { ok: true; resource?: { ownerId: string } }
+  | { ok: true; resource?: OwnedResource }
   | { ok: false; status: number; error: string };
 
 /**
  * The thing the call is about, for the tools whose authority is scoped to a
- * resource. `docs` names one document; the other tools reach nothing anybody
- * owns, so they have no resource to compare against.
+ * resource. `docs` names one document — its owner and its visibility, which is
+ * everything `can()` needs and nothing about what it says. The other tools
+ * reach nothing anybody owns, so they have no resource to compare against.
  */
 function resolveResource(
   directory: GatewayDirectory,
@@ -361,7 +362,10 @@ function resolveResource(
     // against, so there is no authorization question that could come out well.
     return { ok: false, status: 404, error: "Document not found" };
   }
-  return { ok: true, resource: { ownerId: doc.ownerId } };
+  return {
+    ok: true,
+    resource: { ownerId: doc.ownerId, visibility: doc.visibility },
+  };
 }
 
 /**

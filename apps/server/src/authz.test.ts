@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { can } from "./authz.js";
+import { can, visibleTo } from "./authz.js";
 import { ROLE_TOOLS } from "./types.js";
 import type { Principal, Role, ToolName } from "./types.js";
 
@@ -44,19 +44,65 @@ describe("can()", () => {
       expect(decision.reason).toContain(tool);
     }
     // Owning the resource does not rescue it: the role is checked first.
-    const owned = can(suspended, "docs", { ownerId: suspended.ownerId });
+    const owned = can(suspended, "docs", {
+      ownerId: suspended.ownerId,
+      visibility: "private",
+    });
     expect(owned.allow).toBe(false);
     expect(owned.reason.length).toBeGreaterThan(0);
+    // Neither does a public one, for the same reason.
+    const shared = can(suspended, "docs", {
+      ownerId: "user-a",
+      visibility: "public",
+    });
+    expect(shared.allow).toBe(false);
+    expect(shared.reason).toContain("suspended");
   });
 
-  // The frozen contract in one table: allow iff the role grants the tool and,
-  // when a resource is named, the principal owns it.
+  // The predicate the gateway and the tool service both import. It has exactly
+  // one home: a second copy is how search starts leaking rows the direct-fetch
+  // path hides.
+  describe("visibleTo()", () => {
+    it("shows a human their own document, public or private", () => {
+      expect(
+        visibleTo({ ownerId: "user-a", visibility: "private" }, "user-a"),
+      ).toBe(true);
+      expect(
+        visibleTo({ ownerId: "user-a", visibility: "public" }, "user-a"),
+      ).toBe(true);
+    });
+
+    it("shows anybody a public document", () => {
+      expect(
+        visibleTo({ ownerId: "user-a", visibility: "public" }, "user-b"),
+      ).toBe(true);
+    });
+
+    it("hides another human's private document", () => {
+      expect(
+        visibleTo({ ownerId: "user-a", visibility: "private" }, "user-b"),
+      ).toBe(false);
+    });
+
+    it("compares owners exactly, and treats nothing else as public", () => {
+      expect(
+        visibleTo({ ownerId: "user-a", visibility: "private" }, "USER-A"),
+      ).toBe(false);
+      expect(
+        visibleTo({ ownerId: "user-a", visibility: "private" }, ""),
+      ).toBe(false);
+    });
+  });
+
+  // The amended contract in one table: allow iff the role grants the tool and,
+  // when a resource is named, the principal may see it — owned, or public.
   for (const role of ROLES) {
     for (const tool of TOOLS) {
       const acting = principal(role);
       const roleGrants = ROLE_TOOLS[role].includes(tool);
-      const owned = { ownerId: acting.ownerId };
-      const foreign = { ownerId: "someone-else" };
+      const owned = { ownerId: acting.ownerId, visibility: "private" as const };
+      const foreign = { ownerId: "someone-else", visibility: "private" as const };
+      const shared = { ownerId: "someone-else", visibility: "public" as const };
 
       it(`${role} + ${tool} + no resource → ${roleGrants ? "allow" : "deny"}`, () => {
         const decision = can(acting, tool);
@@ -70,13 +116,32 @@ describe("can()", () => {
         expect(decision.reason.length).toBeGreaterThan(0);
       });
 
-      it(`${role} + ${tool} + another owner's resource → deny`, () => {
+      it(`${role} + ${tool} + another owner's private resource → deny`, () => {
         const decision = can(acting, tool, foreign);
         expect(decision.allow).toBe(false);
         expect(decision.reason.length).toBeGreaterThan(0);
       });
+
+      it(`${role} + ${tool} + another owner's public resource → ${roleGrants ? "allow" : "deny"}`, () => {
+        // Public widens who may read, never who owns: the role still has to
+        // grant the tool, and a role that grants nothing still gets nothing.
+        const decision = can(acting, tool, shared);
+        expect(decision.allow).toBe(roleGrants);
+        expect(decision.reason.length).toBeGreaterThan(0);
+      });
     }
   }
+
+  it("never lets public transfer ownership", () => {
+    const basic = principal("basic");
+    const shared = { ownerId: "user-a", visibility: "public" as const };
+    // Readable, and still someone else's: the allow reason says so, and the
+    // resource's owner is unchanged by anybody having read it.
+    const decision = can(basic, "docs", shared);
+    expect(decision.allow).toBe(true);
+    expect(decision.reason).not.toContain("owns this resource");
+    expect(shared.ownerId).toBe("user-a");
+  });
 
   it("names the role in a tool denial and the owner in an ownership denial", () => {
     const basic = principal("basic");
@@ -85,7 +150,10 @@ describe("can()", () => {
     expect(roleDenial.reason).toContain("basic");
     expect(roleDenial.reason).toContain("payments");
 
-    const ownershipDenial = can(basic, "docs", { ownerId: "user-a" });
+    const ownershipDenial = can(basic, "docs", {
+      ownerId: "user-a",
+      visibility: "private",
+    });
     expect(ownershipDenial.allow).toBe(false);
     expect(ownershipDenial.reason).toContain("user-a");
     expect(ownershipDenial.reason).toContain(basic.ownerId);
@@ -94,16 +162,21 @@ describe("can()", () => {
   it("checks the role before ownership, so a denial says what was wrong first", () => {
     // A basic principal reaching for someone else's payments resource is
     // denied for the tool it may never use, not for the ownership it lacks.
-    const decision = can(principal("basic"), "payments", { ownerId: "user-a" });
+    const decision = can(principal("basic"), "payments", {
+      ownerId: "user-a",
+      visibility: "private",
+    });
     expect(decision.allow).toBe(false);
     expect(decision.reason).toContain("payments");
   });
 
   it("compares owners exactly, not case-insensitively or by prefix", () => {
     const admin = principal("admin");
-    expect(can(admin, "docs", { ownerId: "USER-A" }).allow).toBe(false);
-    expect(can(admin, "docs", { ownerId: "user-a2" }).allow).toBe(false);
-    expect(can(admin, "docs", { ownerId: "user-a" }).allow).toBe(true);
+    const privately = (ownerId: string) =>
+      can(admin, "docs", { ownerId, visibility: "private" as const }).allow;
+    expect(privately("USER-A")).toBe(false);
+    expect(privately("user-a2")).toBe(false);
+    expect(privately("user-a")).toBe(true);
   });
 
   it("denies a role the seeded table does not know", () => {
