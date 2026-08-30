@@ -430,7 +430,7 @@ describe("Operator console reads", () => {
     await app.close();
   });
 
-  it("keeps the operator reads behind the shared token", async () => {
+  it("keeps the operator reads and the role lever behind the shared token", async () => {
     const app = await createApp(
       loadConfig({
         NODE_ENV: "test",
@@ -447,6 +447,14 @@ describe("Operator console reads", () => {
       const response = await app.inject({ method: "GET", url });
       expect(response.statusCode).toBe(401);
     }
+    // The lever is guarded like the reads: assigning a role — suspension
+    // included — is exactly the call an unauthenticated client must not make.
+    const patched = await app.inject({
+      method: "PATCH",
+      url: "/api/users/user-b",
+      payload: { role: "suspended" },
+    });
+    expect(patched.statusCode).toBe(401);
     await app.close();
   });
 });
