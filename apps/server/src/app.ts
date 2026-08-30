@@ -8,7 +8,7 @@ import type { AppConfig } from "./config.js";
 import { HttpError } from "./errors.js";
 import { registerGateway } from "./gateway.js";
 import { registerMockTools } from "./mock-tools.js";
-import { DEFAULT_OWNER_ID, ROLE_NAMES } from "./types.js";
+import { DEFAULT_OWNER_ID, ROLE_NAMES, VISIBILITY_NAMES } from "./types.js";
 import type { User } from "./types.js";
 import type { AgentService } from "./agent-service.js";
 
@@ -42,6 +42,34 @@ const updateAgentBody = createAgentBody
   );
 const messageBody = z.object({
   content: z.string().trim().min(1).max(50_000),
+});
+
+/** A few KB of prose. A document is a demo fixture, not a file store. */
+const MAXIMUM_DOCUMENT_CONTENT = 4_000;
+
+/**
+ * Plain text: anything but the control characters that would make a "document"
+ * something other than something to read. Newlines and tabs are text.
+ */
+const CONTROL_CHARACTERS = /[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/;
+
+/**
+ * An Upload, as a client may express it. `strictObject` is the enforcement of
+ * "the owner is never taken from the body": an `ownerId` here is a rejection,
+ * not a field that is quietly ignored and might one day be quietly read.
+ * Visibility is chosen once, here, and nothing edits it afterwards.
+ */
+const createDocumentBody = z.strictObject({
+  title: z.string().trim().min(1).max(120),
+  content: z
+    .string()
+    .min(1)
+    .max(MAXIMUM_DOCUMENT_CONTENT)
+    .refine(
+      (value) => !CONTROL_CHARACTERS.test(value),
+      "A document must be plain text",
+    ),
+  visibility: z.enum(VISIBILITY_NAMES),
 });
 
 /**
@@ -158,6 +186,26 @@ export async function createApp(
   app.get("/api/operator/docs", async () => ({
     docs: service.listDocumentMetadata(),
   }));
+
+  // The human half of the document surface. Scoped by the same `visibleTo` the
+  // gateway scopes an Agent's search with — the symmetry is the point, and it
+  // is why there is no operator override here: the console's metadata-only
+  // table is the all-seeing view, and it carries no content.
+  app.get("/api/docs", async (request) => ({
+    docs: service.listVisibleDocuments(actingUser(request, service).id),
+  }));
+
+  // Upload: create-only. The server generates the id and stamps the acting
+  // human as owner; the body may name neither. Visibility is chosen here and
+  // never changed, because there is nothing that changes it.
+  app.post("/api/docs", async (request, reply) => {
+    const body = createDocumentBody.parse(request.body);
+    const doc = await service.createDocument(
+      body,
+      actingUser(request, service).id,
+    );
+    return reply.code(201).send({ doc });
+  });
 
   app.get("/api/agents", async () => ({ agents: service.listAgents() }));
 

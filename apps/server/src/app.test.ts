@@ -75,7 +75,13 @@ async function appWithStore(runner: AgentRunner = idleRunner) {
     runner,
   );
   await backing.initialize();
-  return { app: await createApp(config, backing), service: backing };
+  return {
+    app: await createApp(config, backing),
+    service: backing,
+    // So a test can reopen what was written, rather than trusting the copy the
+    // process is holding.
+    filePath: path.join(root, "data", "db.json"),
+  };
 }
 
 async function createAgentAs(
@@ -492,6 +498,190 @@ describe("Operator console reads", () => {
       payload: { role: "suspended" },
     });
     expect(patched.statusCode).toBe(401);
+    await app.close();
+  });
+});
+
+describe("Documents in the browser", () => {
+  const upload = (
+    app: Awaited<ReturnType<typeof appWithStore>>["app"],
+    actingUser: string,
+    payload: Record<string, unknown>,
+  ) =>
+    app.inject({
+      method: "POST",
+      url: "/api/docs",
+      headers: { "x-launchpad-user": actingUser },
+      payload,
+    });
+
+  const listAs = async (
+    app: Awaited<ReturnType<typeof appWithStore>>["app"],
+    actingUser: string,
+  ) => {
+    const response = await app.inject({
+      method: "GET",
+      url: "/api/docs",
+      headers: { "x-launchpad-user": actingUser },
+    });
+    expect(response.statusCode).toBe(200);
+    return response;
+  };
+
+  it("lists what the acting human may see, and nothing else", async () => {
+    const { app } = await appWithStore();
+
+    const forB = await listAs(app, "user-b");
+    const ids = (forB.json() as { docs: { id: string }[] }).docs.map(
+      (doc) => doc.id,
+    );
+    // The same predicate the gateway scopes a search with: own + public. No
+    // operator override lives on this surface — there is no god mode.
+    expect(new Set(ids)).toEqual(new Set(["doc-b1", "kb-1", "kb-2", "kb-3"]));
+    for (const doc of SEED_DOCS) {
+      if (doc.ownerId === "user-a" && doc.visibility === "private") {
+        expect(forB.body).not.toContain(doc.id);
+        expect(forB.body).not.toContain(doc.content);
+      }
+    }
+
+    // Switching the acting human re-scopes the same endpoint.
+    const forA = await listAs(app, "user-a");
+    expect(
+      new Set(
+        (forA.json() as { docs: { id: string }[] }).docs.map((doc) => doc.id),
+      ),
+    ).toEqual(new Set(["doc-a1", "doc-a2", "kb-1", "kb-2", "kb-3"]));
+    await app.close();
+  });
+
+  it("stamps an upload with a server id and the acting human as owner", async () => {
+    const { app, service: backing, filePath } = await appWithStore();
+
+    const created = await upload(app, "user-b", {
+      title: "B's private plan",
+      content: "Only user B should ever read this.",
+      visibility: "private",
+    });
+
+    expect(created.statusCode).toBe(201);
+    const doc = (created.json() as { doc: Record<string, unknown> }).doc;
+    expect(doc).toMatchObject({
+      ownerId: "user-b",
+      title: "B's private plan",
+      visibility: "private",
+    });
+    expect(typeof doc.id).toBe("string");
+    expect((doc.id as string).length).toBeGreaterThan(0);
+    expect(backing.findMockDoc(doc.id as string)?.ownerId).toBe("user-b");
+
+    // Persisted, not merely remembered: a judge reloading mid-demo still has it.
+    const reopened = new JsonStore(filePath);
+    await reopened.initialize();
+    expect(
+      reopened.snapshot().docs.find((stored) => stored.id === doc.id),
+    ).toMatchObject({ ownerId: "user-b", visibility: "private" });
+    await app.close();
+  });
+
+  it("never honours an owner the request body names", async () => {
+    const { app, service: backing } = await appWithStore();
+
+    const response = await upload(app, "user-b", {
+      title: "Claiming to be A's",
+      content: "Owner comes from the acting human, never from here.",
+      visibility: "private",
+      ownerId: "user-a",
+    });
+
+    // Rejected rather than quietly ignored: an upload that thinks it chose an
+    // owner and one that did not must not look the same to the client.
+    expect(response.statusCode).toBe(400);
+    expect(
+      backing.listDocumentMetadata().some((doc) => doc.ownerId !== "user-a" &&
+        doc.title === "Claiming to be A's"),
+    ).toBe(false);
+    expect(
+      backing.listDocumentMetadata().some((doc) => doc.title === "Claiming to be A's"),
+    ).toBe(false);
+    await app.close();
+  });
+
+  it("refuses content that is oversized, empty, or not plain text", async () => {
+    const { app, service: backing } = await appWithStore();
+    const before = backing.listDocumentMetadata().length;
+
+    const rejected = [
+      { title: "Too big", content: "x".repeat(8_000), visibility: "private" },
+      { title: "Empty", content: "", visibility: "private" },
+      {
+        title: "Binary",
+        content: "not text: \u0000\u0007",
+        visibility: "private",
+      },
+      { title: "No visibility", content: "text" },
+      { title: "Unknown visibility", content: "text", visibility: "shared" },
+      { title: "", content: "text", visibility: "public" },
+    ];
+    for (const payload of rejected) {
+      const response = await upload(app, "user-a", payload);
+      expect(response.statusCode).toBe(400);
+    }
+    expect(backing.listDocumentMetadata()).toHaveLength(before);
+    await app.close();
+  });
+
+  it("shows an uploaded public document to everyone and a private one to its owner", async () => {
+    const { app } = await appWithStore();
+    const shared = await upload(app, "user-b", {
+      title: "B's public note",
+      content: "Anyone may read this one.",
+      visibility: "public",
+    });
+    const secret = await upload(app, "user-b", {
+      title: "B's private note",
+      content: "Nobody else may read this one.",
+      visibility: "private",
+    });
+    expect(shared.statusCode).toBe(201);
+    expect(secret.statusCode).toBe(201);
+    const sharedId = (shared.json() as { doc: { id: string } }).doc.id;
+    const secretId = (secret.json() as { doc: { id: string } }).doc.id;
+
+    const forA = await listAs(app, "user-a");
+    const seenByA = (forA.json() as { docs: { id: string }[] }).docs.map(
+      (doc) => doc.id,
+    );
+    expect(seenByA).toContain(sharedId);
+    expect(seenByA).not.toContain(secretId);
+    expect(forA.body).not.toContain("Nobody else may read this one.");
+
+    const forB = await listAs(app, "user-b");
+    const seenByB = (forB.json() as { docs: { id: string }[] }).docs.map(
+      (doc) => doc.id,
+    );
+    expect(seenByB).toContain(sharedId);
+    expect(seenByB).toContain(secretId);
+    await app.close();
+  });
+
+  it("keeps the document surfaces behind the shared token", async () => {
+    const app = await createApp(
+      loadConfig({
+        NODE_ENV: "test",
+        GATEWAY_JWT_SECRET: "gateway-test-signing-secret",
+        APP_AUTH_TOKEN: "a-strong-test-token",
+      }),
+      service,
+    );
+    const listed = await app.inject({ method: "GET", url: "/api/docs" });
+    expect(listed.statusCode).toBe(401);
+    const uploaded = await app.inject({
+      method: "POST",
+      url: "/api/docs",
+      payload: { title: "t", content: "c", visibility: "public" },
+    });
+    expect(uploaded.statusCode).toBe(401);
     await app.close();
   });
 });

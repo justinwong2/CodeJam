@@ -1001,6 +1001,37 @@ describe("Tool gateway", () => {
     ]);
   });
 
+  it("returns an uploaded public document to another human's Agent, and not a private one", async () => {
+    // The human listing and the agent's search share one predicate, so what a
+    // person uploads is immediately what the other humans' Agents can or cannot
+    // find — no second rule, no index to rebuild.
+    const fixture = await toolFixture();
+    for (const visibility of ["public", "private"] as const) {
+      const uploaded = await fixture.app.inject({
+        method: "POST",
+        url: "/api/docs",
+        headers: { "x-launchpad-user": "user-a" },
+        payload: {
+          title: `A's ${visibility} upload`,
+          content: `Uploaded ${visibility} content about kittens.`,
+          visibility,
+        },
+      });
+      expect(uploaded.statusCode).toBe(201);
+    }
+    const runJwt = await fixture.runAs("user-b");
+
+    const response = await callTool(fixture.app, runJwt, "search?q=kittens");
+
+    expect(response.statusCode).toBe(200);
+    const results = (response.json() as { results: { title: string }[] })
+      .results;
+    expect(results.map((result) => result.title)).toEqual([
+      "A's public upload",
+    ]);
+    expect(response.body).not.toContain("Uploaded private content");
+  });
+
   it("gives an agent forging a scope header no say in what it sees", async () => {
     const fixture = await toolFixture();
     const runJwt = await fixture.runAs("user-b");

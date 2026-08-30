@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { visibleTo } from "./authz.js";
 import type { AppConfig } from "./config.js";
 import { isArkConfigured } from "./config.js";
 import { HttpError, RunCancelledError } from "./errors.js";
@@ -11,6 +12,7 @@ import type {
   AgentRunner,
   AuditRecord,
   CreateAgentInput,
+  CreateDocumentInput,
   Database,
   GatewayDirectory,
   Message,
@@ -364,6 +366,41 @@ export class AgentService implements GatewayDirectory {
     return this.store.select((database) =>
       database.docs.find((doc) => doc.id === id),
     );
+  }
+
+  /**
+   * The documents one human may see: their own, plus every public one. The same
+   * `visibleTo` the gateway scopes an Agent's search with, so the human listing
+   * and the agent's search cannot disagree about what exists for that owner.
+   * There is deliberately no operator override here — the console's
+   * metadata-only table is the all-seeing view, and it carries no content.
+   */
+  listVisibleDocuments(ownerId: string): MockDoc[] {
+    return this.store
+      .select((database) => database.docs)
+      .filter((doc) => visibleTo(doc, ownerId));
+  }
+
+  /**
+   * An Upload: create-only. The id is the server's and the owner is the acting
+   * human resolved at the request boundary — never a field the body carried.
+   * Visibility is fixed here and there is nothing that changes it afterwards.
+   */
+  async createDocument(
+    input: CreateDocumentInput,
+    ownerId: string,
+  ): Promise<MockDoc> {
+    const doc: MockDoc = {
+      id: "doc-" + randomUUID(),
+      ownerId,
+      title: input.title.trim(),
+      content: input.content,
+      visibility: input.visibility,
+    };
+    await this.store.mutate((database) => {
+      database.docs.push(doc);
+    });
+    return doc;
   }
 
   /**
