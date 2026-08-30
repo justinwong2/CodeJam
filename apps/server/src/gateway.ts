@@ -1,6 +1,7 @@
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { once } from "node:events";
 import { PassThrough } from "node:stream";
+import { AuditLog, type AuditIdentity } from "./audit.js";
 import { can } from "./authz.js";
 import type { AppConfig } from "./config.js";
 import {
@@ -10,7 +11,13 @@ import {
   type ProxyableTool,
 } from "./mock-tools.js";
 import { verifyRunJwt } from "./run-jwt.js";
-import type { GatewayDirectory, Principal, RunSession } from "./types.js";
+import { TOOL_NAMES } from "./types.js";
+import type {
+  GatewayDirectory,
+  Principal,
+  RunSession,
+  ToolName,
+} from "./types.js";
 
 // The gateway is the machine-facing half of the control plane: Codex talks to
 // it instead of to Ark, so the upstream credential lives here and never inside
@@ -84,7 +91,14 @@ function upstreamHeaders(request: FastifyRequest, apiKey: string): Headers {
 
 type Authentication =
   | { authenticated: true; session: RunSession }
-  | { authenticated: false; reason: string };
+  /**
+   * `session` is present only when the store recognized the credential and
+   * refused it anyway — a revoked, expired, or mismatched session. That is the
+   * whole difference between a refusal the audit trail can attribute to a run
+   * and one it cannot: an unverifiable token's claims are not evidence of
+   * anything, so they are never treated as an identity.
+   */
+  | { authenticated: false; reason: string; session?: RunSession };
 
 /**
  * Fail-closed authentication for an agent call. Both halves of the credential
@@ -117,10 +131,10 @@ function authenticate(
     return { authenticated: false, reason: "Unknown run session" };
   }
   if (session.revoked) {
-    return { authenticated: false, reason: "Run session revoked" };
+    return { authenticated: false, reason: "Run session revoked", session };
   }
   if (Date.parse(session.expiresAt) <= Date.now()) {
-    return { authenticated: false, reason: "Run session expired" };
+    return { authenticated: false, reason: "Run session expired", session };
   }
   // A signed token that names a different run than its session would mean the
   // two halves disagree about who is calling. Nothing legitimate produces it.
@@ -128,14 +142,61 @@ function authenticate(
     session.runId !== verified.claims.runId ||
     session.agentId !== verified.claims.agentId
   ) {
-    return { authenticated: false, reason: "Run credential does not match" };
+    return {
+      authenticated: false,
+      reason: "Run credential does not match",
+      session,
+    };
   }
   return { authenticated: true, session };
+}
+
+/**
+ * Who a decision was about when it was reached before a principal could be
+ * resolved. The session is the control plane's own record of who the run acts
+ * for, so it is a fact rather than a claim.
+ */
+function sessionIdentity(session: RunSession): AuditIdentity {
+  return {
+    humanId: session.ownerId,
+    agentId: session.agentId,
+    runId: session.runId,
+  };
+}
+
+function isToolName(value: string): value is ToolName {
+  return (TOOL_NAMES as readonly string[]).includes(value);
+}
+
+/**
+ * Files a refusal, if there is a run and a tool to file it against. A call the
+ * gateway cannot attribute — a forged credential naming no session it knows, a
+ * path naming nothing that is a tool — is still refused and still logged; it
+ * simply has no Run whose evidence trail it belongs in.
+ *
+ * A failed write must never rescue the caller, so it is logged and the denial
+ * stands as it was.
+ */
+async function recordDenial(
+  audit: AuditLog,
+  request: FastifyRequest,
+  identity: AuditIdentity | undefined,
+  tool: ToolName | null,
+  resource: string | null,
+  reason: string,
+): Promise<void> {
+  if (!identity || !tool) return;
+  try {
+    await audit.record({ identity, tool, resource, decision: "deny", reason });
+  } catch {
+    request.log.error("Gateway could not record a denial it had already made");
+  }
 }
 
 async function proxyResponses(
   config: AppConfig,
   directory: GatewayDirectory,
+  audit: AuditLog,
   request: FastifyRequest,
   reply: FastifyReply,
 ): Promise<FastifyReply> {
@@ -147,8 +208,29 @@ async function proxyResponses(
       { reason: authentication.reason },
       "Gateway rejected an agent call",
     );
+    await recordDenial(
+      audit,
+      request,
+      authentication.session && sessionIdentity(authentication.session),
+      "model",
+      null,
+      authentication.reason,
+    );
     return reply.code(401).send({ error: authentication.reason });
   }
+
+  // Recorded before the call is made, not after it returns. What is being
+  // recorded is the gateway's decision to allow it, which is already final —
+  // and evidence written afterwards would go missing exactly when the forward
+  // did. A store that cannot accept the record stops the call: an allowed
+  // request the store cannot vouch for is worse than a failed one.
+  await audit.record({
+    identity: sessionIdentity(authentication.session),
+    tool: "model",
+    resource: null,
+    decision: "allow",
+    reason: "Run session is live; forwarded to the model API",
+  });
 
   const body = request.body;
   let upstream: Response;
@@ -249,72 +331,159 @@ function resolveResource(
 }
 
 /**
+ * What a record says the call was about: the tool and the path it named. Never
+ * the query string and never the body — a search term is content, and content
+ * is what these records deliberately do not keep.
+ */
+function auditResource(tool: string, suffix: string): string {
+  const path = suffix.replace(/^\/+|\/+$/g, "");
+  return path.length > 0 ? `${tool}/${path}` : tool;
+}
+
+/**
  * The tool half of the gateway. The order is the point: authenticate, resolve
  * who is calling, check the role, only then look the resource up, and forward
  * last. Nothing downstream is touched until every check has passed, so a denial
  * is a denial rather than a rollback — and looking the resource up after the
  * role check keeps a caller who may not use the tool at all from learning which
  * documents exist.
+ *
+ * Every outcome leaves exactly one row in the evidence trail: a forward is an
+ * allow, and everything else is a denial, recorded with the reason the caller
+ * was given.
  */
 async function proxyTool(
   config: AppConfig,
   directory: GatewayDirectory,
+  audit: AuditLog,
   request: FastifyRequest,
   reply: FastifyReply,
 ): Promise<FastifyReply> {
+  const params = request.params as { tool?: string; "*"?: string };
+  const requested = params.tool ?? "";
+  const suffix = params["*"] ?? "";
+  // The tool a record can be filed under. `model` is a tool with a route of its
+  // own, so a call arriving here for it is named in the trail and refused;
+  // a path naming nothing that is a tool has no truthful `tool` to be filed as.
+  const named = isToolName(requested) ? requested : null;
+  const resource = auditResource(requested, suffix);
+
   const authentication = authenticate(config, directory, request);
   if (!authentication.authenticated) {
     request.log.warn(
       { reason: authentication.reason },
       "Gateway rejected an agent tool call",
     );
+    await recordDenial(
+      audit,
+      request,
+      authentication.session && sessionIdentity(authentication.session),
+      named,
+      resource,
+      authentication.reason,
+    );
     return reply.code(401).send({ error: authentication.reason });
   }
+  // Until a principal is resolved, the run's own session is who the call is.
+  const identity = sessionIdentity(authentication.session);
 
-  const params = request.params as { tool?: string; "*"?: string };
-  const tool = params.tool ?? "";
-  if (!isProxyableTool(tool)) {
-    // A path that names no tool cannot be authorized, so it is refused rather
-    // than passed along to see what happens.
-    return deny(request, reply, `There is no "${tool}" tool to authorize`);
+  if (!isProxyableTool(requested)) {
+    // A path that names no proxyable tool cannot be authorized, so it is
+    // refused rather than passed along to see what happens.
+    return deny(
+      audit,
+      request,
+      reply,
+      identity,
+      named,
+      resource,
+      `There is no "${requested}" tool to authorize`,
+    );
   }
+  const tool = requested;
 
   const resolution = resolvePrincipal(directory, authentication.session);
   if (!resolution.resolved) {
-    return deny(request, reply, resolution.reason);
+    return deny(
+      audit,
+      request,
+      reply,
+      identity,
+      tool,
+      resource,
+      resolution.reason,
+    );
   }
+  // The principal is the better identity from here on: it is the Agent's owner
+  // as the store holds it now, which is who the decision was actually made for.
   const principal = resolution.principal;
 
   const roleDecision = can(principal, tool);
   if (!roleDecision.allow) {
-    return deny(request, reply, roleDecision.reason, tool);
+    return deny(
+      audit,
+      request,
+      reply,
+      principal,
+      tool,
+      resource,
+      roleDecision.reason,
+    );
   }
+  let allowed = roleDecision.reason;
 
-  const resource = resolveResource(directory, tool, params["*"] ?? "");
-  if (!resource.ok) {
-    return reply.code(resource.status).send({ error: resource.error });
+  const target = resolveResource(directory, tool, suffix);
+  if (!target.ok) {
+    // Not an authorization denial, but not a forward either: the call was
+    // refused, so it leaves the same single row behind, under the status it
+    // earned rather than under a 403 it did not.
+    await recordDenial(audit, request, principal, tool, resource, target.error);
+    return reply.code(target.status).send({ error: target.error });
   }
-  if (resource.resource) {
-    const ownershipDecision = can(principal, tool, resource.resource);
+  if (target.resource) {
+    const ownershipDecision = can(principal, tool, target.resource);
     if (!ownershipDecision.allow) {
-      return deny(request, reply, ownershipDecision.reason, tool);
+      return deny(
+        audit,
+        request,
+        reply,
+        principal,
+        tool,
+        resource,
+        ownershipDecision.reason,
+      );
     }
+    allowed = ownershipDecision.reason;
   }
 
-  return forwardToTool(config, request, reply, tool, params["*"] ?? "");
+  // Recorded before the tool is called, for the same reason the model proxy
+  // records before it forwards: the decision is already made, and a store that
+  // cannot accept the record stops the call rather than losing it.
+  await audit.record({
+    identity: principal,
+    tool,
+    resource,
+    decision: "allow",
+    reason: allowed,
+  });
+  return forwardToTool(config, request, reply, tool, suffix);
 }
 
-/** One shape for every authorization refusal: 403, the reason, nothing else. */
-function deny(
+/** One shape for every authorization refusal: 403, the reason, one record. */
+async function deny(
+  audit: AuditLog,
   request: FastifyRequest,
   reply: FastifyReply,
+  identity: AuditIdentity | undefined,
+  tool: ToolName | null,
+  resource: string | null,
   reason: string,
-  tool?: ProxyableTool,
-): FastifyReply {
+): Promise<FastifyReply> {
   request.log.warn(
     { reason, ...(tool ? { tool } : {}) },
     "Gateway denied a tool call",
   );
+  await recordDenial(audit, request, identity, tool, resource, reason);
   return reply.code(403).send({ error: reason });
 }
 
@@ -385,6 +554,9 @@ export async function registerGateway(
   config: AppConfig,
   directory: GatewayDirectory,
 ): Promise<void> {
+  // One writer for every decision this gateway reaches, so no route can answer
+  // an agent without leaving the same evidence behind.
+  const audit = new AuditLog(config, directory);
   await app.register(
     async (scope) => {
       // Byte-for-byte passthrough: no zod, no JSON parse/re-serialize. The
@@ -401,7 +573,7 @@ export async function registerGateway(
         "/responses",
         { bodyLimit: GATEWAY_BODY_LIMIT },
         async (request, reply) =>
-          proxyResponses(config, directory, request, reply),
+          proxyResponses(config, directory, audit, request, reply),
       );
       // Both shapes, so `/tools/search` and `/tools/docs/doc-a1` reach the same
       // pipeline rather than one of them falling through to a 404.
@@ -410,7 +582,7 @@ export async function registerGateway(
           route,
           { bodyLimit: GATEWAY_BODY_LIMIT },
           async (request, reply) =>
-            proxyTool(config, directory, request, reply),
+            proxyTool(config, directory, audit, request, reply),
         );
       }
     },

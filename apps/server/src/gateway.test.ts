@@ -10,7 +10,12 @@ import { createApp } from "./app.js";
 import { loadConfig } from "./config.js";
 import { signRunJwt, type RunJwtClaims } from "./run-jwt.js";
 import { JsonStore } from "./store.js";
-import type { RunnerRequest, RunnerResult, RunSession } from "./types.js";
+import type {
+  AuditRecord,
+  RunnerRequest,
+  RunnerResult,
+  RunSession,
+} from "./types.js";
 import { WorkspaceManager } from "./workspace.js";
 
 const ARK_KEY = "gateway-test-upstream-key";
@@ -29,13 +34,20 @@ function liveSession(overrides: Partial<RunSession> = {}): RunSession {
   };
 }
 
+/** Everything the gateway filed through the stub service, oldest first. */
+const stubAudit: AuditRecord[] = [];
+
 /** The control-plane half of the credential: only these sessions are live. */
 function serviceWith(...sessions: RunSession[]): AgentService {
+  stubAudit.length = 0;
   return {
     listAgents: () => [],
     systemInfo: async () => ({}),
     findRunSession: (jwtId: string) =>
       sessions.find((session) => session.jwtId === jwtId),
+    appendAuditRecord: async (record: AuditRecord) => {
+      stubAudit.push(record);
+    },
   } as unknown as AgentService;
 }
 
@@ -193,6 +205,69 @@ describe("Model gateway", () => {
     expect(call?.authorization).not.toContain(runJwt);
     expect(call?.contentType).toBe("application/json");
     expect(call?.body).toBe(payload);
+    await app.close();
+  });
+
+  it("files exactly one allow record, and files it before it answers", async () => {
+    const upstream = await startEchoUpstream();
+    const session = liveSession();
+    const app = await createApp(
+      configFor(upstream.baseUrl),
+      serviceWith(session),
+    );
+
+    const response = await app.inject({
+      method: "POST",
+      url: "/gateway/v1/responses",
+      headers: {
+        "content-type": "application/json",
+        authorization: `Bearer ${credentialFor(session)}`,
+      },
+      payload: '{"model":"ep-test"}',
+    });
+
+    expect(response.statusCode).toBe(200);
+    // Asserted the instant the reply resolves: evidence written afterwards
+    // would leave a window where the agent knows more than the store does.
+    expect(stubAudit).toHaveLength(1);
+    expect(stubAudit[0]).toMatchObject({
+      humanId: "user-a",
+      agentId: "agent-1",
+      runId: "run-1",
+      tool: "model",
+      resource: null,
+      decision: "allow",
+    });
+    expect(stubAudit[0]?.reason.length).toBeGreaterThan(0);
+    await app.close();
+  });
+
+  it("keeps the record free of the prompt and the reply it authorized", async () => {
+    const upstream = await startUpstream((_call, response) => {
+      response.writeHead(200, { "content-type": "application/json" });
+      response.end(JSON.stringify({ output_text: "the model said this" }));
+    });
+    const session = liveSession();
+    const app = await createApp(
+      configFor(upstream.baseUrl),
+      serviceWith(session),
+    );
+
+    await app.inject({
+      method: "POST",
+      url: "/gateway/v1/responses",
+      headers: {
+        "content-type": "application/json",
+        authorization: `Bearer ${credentialFor(session)}`,
+      },
+      payload: JSON.stringify({ input: "the agent asked this" }),
+    });
+
+    // A record is evidence about a decision, not a second copy of the turn.
+    const persisted = JSON.stringify(stubAudit);
+    expect(persisted).not.toContain("the agent asked this");
+    expect(persisted).not.toContain("the model said this");
+    expect(persisted).not.toContain(ARK_KEY);
     await app.close();
   });
 
@@ -377,6 +452,13 @@ describe("Model gateway authentication", () => {
     expect(upstream.calls).toHaveLength(0);
     expect(response.body).not.toContain(ARK_KEY);
     expect(response.body).not.toContain(GATEWAY_SECRET);
+    // Whatever the gateway could attribute, it never files a rejection twice
+    // and never files one as anything but a denial.
+    expect(stubAudit.length).toBeLessThanOrEqual(1);
+    for (const record of stubAudit) {
+      expect(record).toMatchObject({ tool: "model", decision: "deny" });
+    }
+    expect(JSON.stringify(stubAudit)).not.toContain(GATEWAY_SECRET);
     await app.close();
   }
 
@@ -457,6 +539,37 @@ describe("Model gateway authentication", () => {
       })}`,
     });
   });
+
+  it("files the refusal against the run whose session it recognized", async () => {
+    const session = liveSession({ revoked: true });
+    await expectDenied(session, {
+      authorization: `Bearer ${credentialFor(session)}`,
+    });
+
+    // The identity comes from the stored session, not from the credential the
+    // gateway has just refused to trust.
+    expect(stubAudit).toHaveLength(1);
+    expect(stubAudit[0]).toMatchObject({
+      humanId: "user-a",
+      agentId: "agent-1",
+      runId: "run-1",
+      tool: "model",
+      decision: "deny",
+      reason: "Run session revoked",
+    });
+  });
+
+  it("files nothing for a credential it cannot attribute to any run", async () => {
+    const session = liveSession();
+    const [header, claims] = credentialFor(session).split(".");
+    await expectDenied(session, {
+      authorization: `Bearer ${header}.${claims}.forged-signature`,
+    });
+
+    // A forged token names a run only if its claims are believed, and they are
+    // not. The call is refused and logged; there is no Run to file it under.
+    expect(stubAudit).toEqual([]);
+  });
 });
 
 describe("Tool gateway", () => {
@@ -492,6 +605,10 @@ describe("Tool gateway", () => {
     toolCalls: string[];
     /** Starts a run owned by `userId` and returns its live run credential. */
     runAs: (userId: string) => Promise<string>;
+    /** The run ids `runAs` started, in the order it started them. */
+    runIds: string[];
+    /** What the gateway persisted for a run, read back out of the store. */
+    audit: (runId: string) => AuditRecord[];
   }
 
   async function toolFixture(): Promise<ToolFixture> {
@@ -521,6 +638,7 @@ describe("Tool gateway", () => {
     });
 
     let agents = 0;
+    const runIds: string[] = [];
     const runAs = async (userId: string): Promise<string> => {
       const created = await app.inject({
         method: "POST",
@@ -536,16 +654,23 @@ describe("Tool gateway", () => {
         payload: { content: "use a tool" },
       });
       expect(started.statusCode).toBe(202);
+      runIds.push((started.json() as { run: { id: string } }).run.id);
       agents += 1;
       await expect.poll(() => runJwts.length).toBe(agents);
       return runJwts[agents - 1] ?? "";
     };
 
+    // Read straight out of the store rather than through the API, so what is
+    // asserted is what was persisted rather than what a route chose to return.
+    const store = (service as unknown as { store: JsonStore }).store;
+    const audit = (runId: string): AuditRecord[] =>
+      store.snapshot().audit.filter((record) => record.runId === runId);
+
     openFixtures.push({
       app,
       finish: () => release({ output: "done", threadId: null, usage: null }),
     });
-    return { app, service, toolCalls, runAs };
+    return { app, service, toolCalls, runAs, runIds, audit };
   }
 
   const callTool = (app: FastifyInstance, runJwt: string, url: string) =>
@@ -671,6 +796,115 @@ describe("Tool gateway", () => {
 
     expect(response.statusCode).toBe(403);
     expect(fixture.toolCalls).toEqual([]);
+  });
+
+  it("files one allow record naming the tool and the resource it reached", async () => {
+    const fixture = await toolFixture();
+    const runJwt = await fixture.runAs("user-b");
+
+    const response = await callTool(fixture.app, runJwt, "docs/doc-b1");
+
+    expect(response.statusCode).toBe(200);
+    // Persisted by the time the agent has its answer, exactly once.
+    expect(fixture.audit(fixture.runIds[0] ?? "")).toMatchObject([
+      {
+        humanId: "user-b",
+        tool: "docs",
+        resource: "docs/doc-b1",
+        decision: "allow",
+      },
+    ]);
+  });
+
+  it("files one deny record carrying the reason can() gave", async () => {
+    const fixture = await toolFixture();
+    const runJwt = await fixture.runAs("user-b");
+
+    const response = await callTool(fixture.app, runJwt, "payments");
+
+    expect(response.statusCode).toBe(403);
+    const records = fixture.audit(fixture.runIds[0] ?? "");
+    expect(records).toHaveLength(1);
+    expect(records[0]).toMatchObject({
+      humanId: "user-b",
+      tool: "payments",
+      resource: "payments",
+      decision: "deny",
+    });
+    // The record says the same thing the caller was told, in the same words.
+    expect(records[0]?.reason).toBe(
+      (response.json() as { error: string }).error,
+    );
+  });
+
+  it("files an ownership denial against the document it protected", async () => {
+    const fixture = await toolFixture();
+    const runJwt = await fixture.runAs("user-b");
+
+    const response = await callTool(fixture.app, runJwt, "docs/doc-a1");
+
+    expect(response.statusCode).toBe(403);
+    const records = fixture.audit(fixture.runIds[0] ?? "");
+    expect(records).toHaveLength(1);
+    expect(records[0]).toMatchObject({
+      tool: "docs",
+      resource: "docs/doc-a1",
+      decision: "deny",
+    });
+    expect(records[0]?.reason).toContain("resource owned by user-a");
+    // The record names the document; it never carries what was inside it.
+    expect(JSON.stringify(records)).not.toContain("quarterly plan");
+  });
+
+  it("files a document that does not exist as a refusal, not as a forward", async () => {
+    const fixture = await toolFixture();
+    const runJwt = await fixture.runAs("user-a");
+
+    const response = await fixture.app.inject({
+      method: "GET",
+      url: "/gateway/v1/tools/docs/doc-nonexistent",
+      headers: { authorization: `Bearer ${runJwt}` },
+    });
+
+    expect(response.statusCode).toBe(404);
+    // Nothing was forwarded, so nothing was allowed: one record, and it is a
+    // denial. Every answered call leaves exactly one row behind.
+    expect(fixture.audit(fixture.runIds[0] ?? "")).toMatchObject([
+      { tool: "docs", resource: "docs/doc-nonexistent", decision: "deny" },
+    ]);
+  });
+
+  it("files a tool it does not proxy under the tool that was named", async () => {
+    const fixture = await toolFixture();
+    const runJwt = await fixture.runAs("user-a");
+
+    const response = await fixture.app.inject({
+      method: "GET",
+      url: "/gateway/v1/tools/model/responses",
+      headers: { authorization: `Bearer ${runJwt}` },
+    });
+
+    expect(response.statusCode).toBe(403);
+    expect(fixture.audit(fixture.runIds[0] ?? "")).toMatchObject([
+      { tool: "model", decision: "deny" },
+    ]);
+  });
+
+  it("files nothing for a path that names no tool at all", async () => {
+    const fixture = await toolFixture();
+    const runJwt = await fixture.runAs("user-a");
+
+    const response = await fixture.app.inject({
+      method: "GET",
+      url: "/gateway/v1/tools/frobnicate",
+      headers: { authorization: `Bearer ${runJwt}` },
+    });
+
+    // Still refused, still logged — but a record's `tool` is a tool, and this
+    // request named none, so there is nothing truthful to file it under.
+    expect(response.statusCode).toBe(403);
+    expect(fixture.toolCalls).toEqual([]);
+    expect(fixture.audit(fixture.runIds[0] ?? "")).toEqual([]);
   });
 
   it("denies an Agent whose owner is no longer a known user", async () => {
