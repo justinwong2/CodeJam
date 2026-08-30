@@ -1,6 +1,19 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { api, ApiError, setAuthToken } from "./api";
-import type { Agent, AgentRun, Message, SystemInfo } from "./types";
+import {
+  api,
+  ApiError,
+  getActingUserId,
+  setActingUserId,
+  setAuthToken,
+} from "./api";
+import type {
+  Agent,
+  AgentRun,
+  AuditRecord,
+  Message,
+  SystemInfo,
+  User,
+} from "./types";
 
 const starterPrompts = [
   "Create a small TypeScript CLI that prints a weather summary from sample JSON.",
@@ -22,6 +35,20 @@ function formatTime(value: string): string {
   }).format(new Date(value));
 }
 
+function formatUsage(run: AgentRun | null): string {
+  const usage = run?.usage;
+  const parts = [
+    usage?.inputTokens != null ? usage.inputTokens + " in" : null,
+    usage?.cachedInputTokens != null
+      ? usage.cachedInputTokens + " cached"
+      : null,
+    usage?.outputTokens != null ? usage.outputTokens + " out" : null,
+  ].filter((part): part is string => part !== null);
+  return parts.length > 0
+    ? parts.join(" · ") + " tokens"
+    : "No token usage reported yet";
+}
+
 function StatusPill({ status }: { status: Agent["status"] }) {
   return (
     <span className={"status status-" + status}>
@@ -40,11 +67,17 @@ export default function App() {
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [messages, setMessages] = useState<Message[]>([]);
   const [system, setSystem] = useState<SystemInfo | null>(null);
+  const [users, setUsers] = useState<User[]>([]);
+  const [actingUser, setActingUser] = useState(getActingUserId);
   const [showCreate, setShowCreate] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
   const [form, setForm] = useState(emptyForm);
   const [prompt, setPrompt] = useState("");
   const [activeRun, setActiveRun] = useState<AgentRun | null>(null);
+  const [runEvidence, setRunEvidence] = useState<{
+    runId: string;
+    records: AuditRecord[];
+  } | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [authRequired, setAuthRequired] = useState<boolean | null>(null);
@@ -78,8 +111,42 @@ export default function App() {
   }, []);
 
   const bootstrap = useCallback(async () => {
-    await Promise.all([refreshAgents(), api.system().then(setSystem)]);
+    await Promise.all([
+      refreshAgents(),
+      api.system().then(setSystem),
+      api.users().then((result) => setUsers(result.users)),
+    ]);
   }, [refreshAgents]);
+
+  /**
+   * Switching users changes who the browser claims to be, nothing else. The
+   * server resolves that user's role and ownership on every call it receives.
+   */
+  const switchActingUser = async (id: string) => {
+    setActingUserId(id);
+    setActingUser(id);
+    setError(null);
+    try {
+      await refreshAgents();
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : String(reason));
+    }
+  };
+
+  const usersById = useMemo(
+    () => new Map(users.map((user) => [user.id, user])),
+    [users],
+  );
+
+  const ownerName = (ownerId: string) =>
+    usersById.get(ownerId)?.name ?? ownerId;
+
+  const ownerRole = (ownerId: string) => usersById.get(ownerId)?.role ?? null;
+
+  // Only ever show evidence belonging to the Run on screen, so switching Runs
+  // cannot leave one Run's decisions filed under another's name.
+  const auditRecords =
+    activeRun && runEvidence?.runId === activeRun.id ? runEvidence.records : [];
 
   useEffect(() => {
     mountedRef.current = true;
@@ -134,6 +201,31 @@ export default function App() {
   useEffect(() => {
     messageEnd.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages, activeRun]);
+
+  /**
+   * The Run's gateway decisions, read back alongside the Run itself: polling
+   * replaces `activeRun` on every tick, so decisions appear while the Run is
+   * still going rather than only once it finishes. The read is best-effort —
+   * evidence trouble must not take the Playground down with it.
+   */
+  useEffect(() => {
+    const runId = activeRun?.id;
+    if (!runId) return;
+    let current = true;
+    void api
+      .runAudit(runId)
+      .then((result) => {
+        if (current && mountedRef.current) {
+          setRunEvidence({ runId, records: result.audit });
+        }
+      })
+      .catch(() => {
+        // Leave whatever the panel already shows for this Run.
+      });
+    return () => {
+      current = false;
+    };
+  }, [activeRun]);
 
   const createAgent = async (event: React.FormEvent) => {
     event.preventDefault();
@@ -340,6 +432,28 @@ export default function App() {
           </div>
         </div>
 
+        <div className="user-switcher">
+          <label htmlFor="acting-user">Acting as</label>
+          <select
+            id="acting-user"
+            value={actingUser}
+            onChange={(event) => void switchActingUser(event.target.value)}
+          >
+            {users.length === 0 && (
+              <option value={actingUser}>{actingUser}</option>
+            )}
+            {users.map((user) => (
+              <option key={user.id} value={user.id}>
+                {user.name} · {user.role}
+              </option>
+            ))}
+          </select>
+          <span>
+            Dev switcher. The server resolves this user&apos;s role and decides
+            what their Agents may do.
+          </span>
+        </div>
+
         <button
           className="button button-primary create-button"
           onClick={() => {
@@ -351,7 +465,7 @@ export default function App() {
         </button>
 
         <div className="sidebar-label">
-          <span>Your Agents</span>
+          <span>Agents</span>
           <span>{agents.length}</span>
         </div>
         <nav className="agent-list">
@@ -369,6 +483,16 @@ export default function App() {
               <div className="agent-card-copy">
                 <strong>{agent.name}</strong>
                 <span>{agent.description || "Coding Agent"}</span>
+                <span
+                  className={
+                    "owner-tag " +
+                    (agent.ownerId === actingUser ? "owner-tag-self" : "")
+                  }
+                >
+                  {agent.ownerId === actingUser
+                    ? "Owned by you"
+                    : "Owned by " + ownerName(agent.ownerId)}
+                </span>
               </div>
               <span className={"mini-dot mini-" + agent.status} />
             </button>
@@ -422,6 +546,12 @@ export default function App() {
                 <div className="header-title-row">
                   <h1>{selected.name}</h1>
                   <StatusPill status={selected.status} />
+                  <span className="owner-pill">
+                    {ownerName(selected.ownerId)}
+                    {ownerRole(selected.ownerId)
+                      ? " · " + ownerRole(selected.ownerId)
+                      : ""}
+                  </span>
                 </div>
                 <p>
                   {selected.description ||
@@ -620,6 +750,52 @@ export default function App() {
                   </button>
                 </div>
               </form>
+
+              <section className="evidence" aria-live="polite">
+                <div className="evidence-topbar">
+                  <div>
+                    <span className="eyebrow">Gateway evidence</span>
+                    <h3>What this Run was allowed to do</h3>
+                  </div>
+                  <span className="evidence-usage">
+                    {formatUsage(activeRun)}
+                  </span>
+                </div>
+
+                {auditRecords.length === 0 ? (
+                  <p className="evidence-empty">
+                    {activeRun
+                      ? "No gateway decisions recorded for this Run yet."
+                      : "Send a task — the gateway's decisions for that Run appear here."}
+                  </p>
+                ) : (
+                  <ul className="audit-list">
+                    {auditRecords.map((record) => (
+                      <li
+                        className={"audit-row audit-" + record.decision}
+                        key={record.id}
+                      >
+                        <span className="audit-decision">
+                          {record.decision}
+                        </span>
+                        <span className="audit-tool">{record.tool}</span>
+                        <span className="audit-resource">
+                          {record.resource ?? "—"}
+                        </span>
+                        <span className="audit-reason">{record.reason}</span>
+                        <span className="audit-ts">
+                          {formatTime(record.ts)}
+                        </span>
+                      </li>
+                    ))}
+                  </ul>
+                )}
+
+                <p className="evidence-note">
+                  Every row was decided and recorded server-side by the gateway
+                  before the Agent got an answer. This panel only displays them.
+                </p>
+              </section>
             </section>
           </>
         ) : (
@@ -702,6 +878,12 @@ export default function App() {
                 maxLength={10_000}
               />
             </label>
+            <p className="owner-note">
+              The server records this Agent as owned by{" "}
+              <strong>{ownerName(actingUser)}</strong>
+              {ownerRole(actingUser) ? " (" + ownerRole(actingUser) + ")" : ""}.
+              Its Runs get that owner&apos;s authority, and no more.
+            </p>
             <div className="modal-footer">
               <button
                 type="button"
