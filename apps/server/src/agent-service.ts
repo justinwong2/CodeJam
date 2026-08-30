@@ -15,6 +15,7 @@ import type {
   GatewayDirectory,
   Message,
   MockDoc,
+  Role,
   RunSession,
   UpdateAgentInput,
   User,
@@ -80,6 +81,27 @@ export class AgentService implements GatewayDirectory {
   /** The seeded humans, in seeded order — the switcher's list. */
   listUsers(): User[] {
     return this.store.select((database) => database.users);
+  }
+
+  /**
+   * Gives a seeded human a different role. There is no token to reissue and
+   * nothing to tell the Runtime: the gateway resolves the owner's role from
+   * here on every call, so the change lands on the target's Agents' next
+   * gateway call — including the calls of a run that is already in flight.
+   *
+   * The operator action itself is deliberately not audited: an `AuditRecord`
+   * belongs to a Run, and this has none. Noted as a limitation in SECURITY.md
+   * rather than papered over with a record that names no run.
+   */
+  async setUserRole(id: string, role: Role): Promise<User> {
+    return this.store.mutate((database) => {
+      const user = database.users.find((item) => item.id === id);
+      if (!user) {
+        throw new HttpError(404, "User not found");
+      }
+      user.role = role;
+      return structuredClone(user);
+    });
   }
 
   /** The seeded human behind an id, or nothing if no such human exists. */

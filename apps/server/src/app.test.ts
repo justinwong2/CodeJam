@@ -7,7 +7,7 @@ import { AgentService } from "./agent-service.js";
 import { createApp } from "./app.js";
 import { loadConfig } from "./config.js";
 import { JsonStore, SEED_USERS } from "./store.js";
-import type { Agent, AgentRunner, AuditRecord } from "./types.js";
+import type { Agent, AgentRunner, AuditRecord, User } from "./types.js";
 import { WorkspaceManager } from "./workspace.js";
 
 const service = {
@@ -235,6 +235,59 @@ describe("Acting user", () => {
         { id: "user-b", name: "User B", role: "basic" },
       ],
     });
+    await app.close();
+  });
+
+  it("reassigns a seeded user's role, and the store keeps it", async () => {
+    const { app, service: backing } = await appWithStore();
+    const response = await app.inject({
+      method: "PATCH",
+      url: "/api/users/user-b",
+      payload: { role: "suspended" },
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toEqual({
+      user: { id: "user-b", name: "User B", role: "suspended" },
+    });
+    // What matters is the stored fact: the gateway reads the role from here on
+    // every call, so this is what a suspended owner's agents will be judged by.
+    expect(backing.findUser("user-b")?.role).toBe("suspended");
+
+    const listed = await app.inject({ method: "GET", url: "/api/users" });
+    expect((listed.json() as { users: User[] }).users).toContainEqual({
+      id: "user-b",
+      name: "User B",
+      role: "suspended",
+    });
+    await app.close();
+  });
+
+  it("refuses to give a role to a user who does not exist", async () => {
+    const { app } = await appWithStore();
+    const response = await app.inject({
+      method: "PATCH",
+      url: "/api/users/user-ghost",
+      headers: { "x-launchpad-user": "user-a" },
+      payload: { role: "admin" },
+    });
+    expect(response.statusCode).toBe(404);
+    await app.close();
+  });
+
+  it("refuses a role outside the seeded three", async () => {
+    const { app, service: backing } = await appWithStore();
+    // Assigning roles is in scope; authoring them is not. An unknown role must
+    // be a rejection, never a role nothing in ROLE_TOOLS grants anything to.
+    for (const role of ["superuser", "", "ADMIN", null]) {
+      const response = await app.inject({
+        method: "PATCH",
+        url: "/api/users/user-b",
+        payload: { role },
+      });
+      expect(response.statusCode).toBe(400);
+    }
+    expect(backing.findUser("user-b")?.role).toBe("basic");
     await app.close();
   });
 

@@ -8,7 +8,7 @@ import type { AppConfig } from "./config.js";
 import { HttpError } from "./errors.js";
 import { registerGateway } from "./gateway.js";
 import { registerMockTools } from "./mock-tools.js";
-import { DEFAULT_OWNER_ID } from "./types.js";
+import { DEFAULT_OWNER_ID, ROLE_NAMES } from "./types.js";
 import type { User } from "./types.js";
 import type { AgentService } from "./agent-service.js";
 
@@ -22,6 +22,13 @@ const actingUserHeader = z.string().trim().min(1).optional();
 
 const agentIdParams = z.object({ id: z.string().uuid() });
 const runIdParams = z.object({ id: z.string().uuid() });
+const userIdParams = z.object({ id: z.string().trim().min(1).max(64) });
+/**
+ * The whole vocabulary of a role change: one of the seeded roles, and nothing
+ * else. Assigning roles is in scope for the operator; authoring them is not, so
+ * an unrecognized value is a 400 rather than a role no grant table knows.
+ */
+const updateUserBody = z.object({ role: z.enum(ROLE_NAMES) });
 const createAgentBody = z.object({
   name: z.string().trim().min(1).max(80),
   description: z.string().max(500).optional(),
@@ -126,6 +133,16 @@ export async function createApp(
   app.get("/api/system", async () => service.systemInfo());
 
   app.get("/api/users", async () => ({ users: service.listUsers() }));
+
+  // The operator's other lever, beside revocation: change what a human may do
+  // rather than cutting one run off. It takes effect on that human's Agents'
+  // next gateway call, with no token event of any kind, because permissions are
+  // read from the store per call and were never in the credential.
+  app.patch("/api/users/:id", async (request) => {
+    const { id } = userIdParams.parse(request.params);
+    const body = updateUserBody.parse(request.body);
+    return { user: await service.setUserRole(id, body.role) };
+  });
 
   app.get("/api/agents", async () => ({ agents: service.listAgents() }));
 

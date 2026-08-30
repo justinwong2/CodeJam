@@ -1132,6 +1132,59 @@ describe("Tool gateway", () => {
     ]);
   });
 
+  it("follows a role change mid-run, on the same unexpired credential", async () => {
+    const fixture = await toolFixture();
+    const runJwt = await fixture.runAs("user-b");
+    const runId = fixture.runIds[0] ?? "";
+
+    // Basic: the payments tool is refused.
+    const denied = await callTool(fixture.app, runJwt, "payments");
+    expect(denied.statusCode).toBe(403);
+    expect(fixture.toolCalls).toEqual([]);
+
+    // The operator promotes the owner. No token is reissued and the run is
+    // never told: the role lives in the store, and the gateway reads it there.
+    const promoted = await fixture.app.inject({
+      method: "PATCH",
+      url: "/api/users/user-b",
+      payload: { role: "admin" },
+    });
+    expect(promoted.statusCode).toBe(200);
+
+    // Same run, same credential, different answer.
+    const allowed = await callTool(fixture.app, runJwt, "payments");
+    expect(allowed.statusCode).toBe(201);
+    expect(fixture.toolCalls).toEqual(["/internal/tools/payments"]);
+
+    // And back again, so the demotion is proven as live as the promotion.
+    const demoted = await fixture.app.inject({
+      method: "PATCH",
+      url: "/api/users/user-b",
+      payload: { role: "basic" },
+    });
+    expect(demoted.statusCode).toBe(200);
+    const deniedAgain = await callTool(fixture.app, runJwt, "payments");
+    expect(deniedAgain.statusCode).toBe(403);
+    expect(fixture.toolCalls).toEqual(["/internal/tools/payments"]);
+
+    // Three decisions, in order, each carrying the reason it was given for.
+    const records = fixture.audit(runId);
+    expect(records.map((record) => record.decision)).toEqual([
+      "deny",
+      "allow",
+      "deny",
+    ]);
+    expect(records[0]?.reason).toContain('Role "basic"');
+    expect(records[1]?.reason).toContain('Role "admin"');
+    expect(records[2]?.reason).toContain('Role "basic"');
+    // Every row is filed against the same run and the same human throughout.
+    expect(
+      records.every(
+        (record) => record.runId === runId && record.humanId === "user-b",
+      ),
+    ).toBe(true);
+  });
+
   it("denies an Agent whose owner is no longer a known user", async () => {
     const fixture = await toolFixture();
     const runJwt = await fixture.runAs("user-a");
