@@ -11,7 +11,9 @@ credentials, personal data, or exploit details in an issue.
 
 ## Known limitations
 
-- Shared demo token; no user identity, authorization, RBAC, or tenant isolation
+- Shared demo token; no real user identity (the acting human is a seeded id the
+  browser names) and no tenant isolation. Agent calls _are_ authorized: see the
+  gateway entries below.
 - No CSRF protection
 - No per-Agent container boundary in ECS mode
 - Ordinary local containers, not hardened multi-tenant sandboxes
@@ -27,13 +29,32 @@ credentials, personal data, or exploit details in an issue.
   hook by design — agents authenticate as themselves, not as the browser
   operator. `GATEWAY_JWT_SECRET` signs those credentials, never leaves the
   server process, and is required at startup.
-- Tool calls are authorized as well as authenticated. The gateway resolves the
-  acting human from the Agent's current owner in the store — permissions are
-  deliberately absent from the run credential — and applies `can()` before
-  forwarding, so a role or ownership denial is a `403` and the tool is never
-  called. The mock tool service accepts only calls carrying
-  `GATEWAY_TOOL_CREDENTIAL`, which never leaves the server process, so the
-  check cannot be walked around by calling the tool directly.
+- Every agent call is authorized as well as authenticated — the model included.
+  The gateway resolves the acting human from the Agent's current owner in the
+  store — permissions are deliberately absent from the run credential — and
+  applies `can()` before forwarding, so a role or ownership denial is a `403`
+  and nothing downstream is reached. The `suspended` role grants no tools at
+  all, so a suspended owner's Agents cannot call a tool or spend model tokens,
+  while their run credentials stay signed, unexpired, and unrevoked: the
+  credential is identity, never permission. The mock tool service accepts only
+  calls carrying `GATEWAY_TOOL_CREDENTIAL`, which never leaves the server
+  process, so the check cannot be walked around by calling the tool directly.
+- Operator actions are not audited. `PATCH /api/users/:id` (assign a role) and
+  `POST /api/agents/:id/revoke` leave no `AuditRecord`, because a record belongs
+  to a Run and an operator action has none. Their effect is visible in the very
+  next gateway decision, and in the Operator Console's session table, but there
+  is no "who changed this role, and when". Accepted for POC scope; a real
+  deployment needs a separate operator-action log, and neither endpoint is
+  protected by anything stronger than the shared `APP_AUTH_TOKEN`.
+- The Operator Console is not gated by the `admin` role. Role-gating it under
+  mock authentication would be theater — the browser chooses which seeded human
+  it claims to be. Everything it shows sits behind `APP_AUTH_TOKEN` like the
+  rest of `/api`, and it enforces nothing: it renders decisions the server
+  already made and triggers two endpoints the server already guards. Its
+  session view is claims only — `jti`, agent, owner, run, issued, expires,
+  revoked — and the raw run credential appears in no payload and renders
+  nowhere. Its document table is metadata only: ids and owners, never content,
+  so it is not a way around the ownership rule the gateway enforces.
 - Every gateway decision is recorded before the answer is sent, and the record
   is a decision rather than a payload. It holds the acting human, Agent, and
   Run, the tool, the `resource` identifier it named (`docs/doc-b1`), the

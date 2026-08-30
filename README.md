@@ -28,7 +28,8 @@ Volcengine ECS.
 
 - React and TypeScript Web UI
 - Agent create, edit, start, stop, delete, and multi-turn chat
-- Dev user switcher and a per-Run gateway evidence panel, both display-only
+- Dev user switcher, a per-Run gateway evidence panel, and an Operator Console
+  (decision feed, sessions, documents, roles) — all display-and-trigger only
 - Fastify control plane with asynchronous Run state
 - Persistent Agent workspaces and Codex sessions
 - Disposable Docker, Colima, or Podman container for each local turn
@@ -130,6 +131,15 @@ tool, the resource, allow or deny, and the reason — with denials highlighted,
 next to the Run's token usage. Switching to User B and asking that user's Agent
 for `payments`, or for one of User A's documents, is how you see a denial. The
 panel only displays what the server already enforced and recorded.
+
+The sidebar's **Operator Console** opens the same evidence across every Agent
+and Run, beside the sessions, documents, and roles behind it. Two levers live
+there: **Revoke** ends a live run credential, so the Agent's next gateway call
+dies mid-run; the **role** dropdown reassigns a human between `admin`, `basic`,
+and `suspended`, which takes effect on that human's Agents' next call without
+reissuing anything. Suspending a user is the strongest demo: their Agent is
+refused the model itself, not merely a tool. The console decides nothing — it
+asks the server, and shows what the server then says.
 
 ### 5. Stop and resume
 
@@ -248,6 +258,7 @@ cp deploy/volcengine/terraform.tfvars.example \
 | `RUNTIME_PROVIDER`        | `local-process`       | `container` for disposable local Runtime containers.                                                                                                                                          |
 | `CODEX_SANDBOX_MODE`      | `workspace-write`     | Codex inner sandbox mode.                                                                                                                                                                     |
 | `CODEX_TIMEOUT_MS`        | `600000`              | Maximum duration of one turn.                                                                                                                                                                 |
+| `SESSION_TTL_MS`          | `660000`              | How long a run's gateway credential stays usable. Revocation is immediate and does not wait for it.                                                                                           |
 | `LOCAL_POC_DATA_ROOT`     | Platform-specific     | Local metadata, workspace, and session directory.                                                                                                                                             |
 
 See [.env.example](.env.example) for all Runtime and resource-limit options.
@@ -268,10 +279,12 @@ flowchart LR
 
 Codex never holds the Ark key: it calls the gateway with a run credential, and
 the gateway attaches the real key on the way upstream, streaming the reply back.
-Tool calls take the same gateway and are authorized against the Agent owner's
-role and the resource's owner before anything is forwarded. Every decision —
-allowed or denied — is recorded before the answer is sent, and a Run's trail is
-readable at `GET /api/runs/:id/audit`.
+Model and tool calls alike are authorized against the Agent owner's live role —
+and, for a document, the resource's owner — before anything is forwarded, so a
+`suspended` owner's Agent is refused the model as well as the tools. Every
+decision, allowed or denied, is recorded before the answer is sent; a Run's
+trail is readable at `GET /api/runs/:id/audit`, and the Operator Console shows
+every Run's decisions beside the sessions, documents, and roles behind them.
 
 The first turn uses `codex exec`; later turns resume the stored Codex thread.
 Deleting an Agent archives its workspace under `workspaces/.deleted/`.

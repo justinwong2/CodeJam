@@ -130,7 +130,7 @@ inventing new ones:
 ### Web UI
 
 The browser is **not** one of those seams: it shows what the server decided and
-enforces nothing. Two pieces of it exist for the gateway, and both are
+enforces nothing. Three pieces of it exist for the gateway, and all are
 display-only on purpose — a UI-side check would score nothing and be bypassed by
 any client that is not this one.
 
@@ -144,9 +144,21 @@ any client that is not this one.
   polling tick and renders the Run's decisions — tool, resource, decision,
   reason — with denials visually distinct, beside the Run's token usage. It
   never derives a decision, and shows an empty state rather than inventing one.
+- **Operator Console.** A second view in `App.tsx`, reached from the sidebar. It
+  reads `GET /api/operator/{audit,sessions,docs}` on a three-second tick and
+  renders four tables: the decision feed across every Agent and Run (denials
+  distinct, newest first), run sessions **as claims** with a Revoke button on
+  the live ones, the ground-truth document table (metadata only), and a role
+  dropdown per human. Its two levers are the existing
+  `POST /api/agents/:id/revoke` and `PATCH /api/users/:id` — it triggers them
+  and displays what the store then says. It decides nothing, and it is
+  deliberately **not** gated by the `admin` role: mock authentication makes
+  role-gating an operator surface theater. Use "operator" for the surface and
+  "admin" only for the role.
 
-`apps/web/src/types.ts` mirrors the server's `User`, `Role`, `AuditRecord`, and
-`Agent.ownerId`. The server's `types.ts` is canonical; keep the two in sync.
+`apps/web/src/types.ts` mirrors the server's `User`, `Role`, `AuditRecord`,
+`RunSessionClaims`, `MockDocMetadata`, and `Agent.ownerId`. The server's
+`types.ts` is canonical; keep the two in sync.
 
 ## API Endpoints
 
@@ -159,6 +171,10 @@ All under `/api`. Auth is a single optional shared bearer token
 | GET    | `/api/auth`                | Whether a token is required          |
 | GET    | `/api/system`              | Runtime/engine diagnostics           |
 | GET    | `/api/users`               | Seeded users for the dev switcher    |
+| PATCH  | `/api/users/:id`           | Assign a seeded role: `{ role }`     |
+| GET    | `/api/operator/audit`      | Every Run's decisions, by `ts`       |
+| GET    | `/api/operator/sessions`   | Run sessions as claims, newest first |
+| GET    | `/api/operator/docs`       | Document metadata: id and owner      |
 | GET    | `/api/agents`              | List Agents                          |
 | POST   | `/api/agents`              | Create an Agent                      |
 | GET    | `/api/agents/:id`          | Get one Agent                        |
@@ -179,13 +195,22 @@ authentication by design — the middleware being scored is authorization — an
 it decides which user a newly created Agent is owned by. The web app's half of
 it is the dev user switcher in `api.ts` (see Web UI below).
 
+`PATCH /api/users/:id` accepts exactly `{ role }`, one of `admin`, `basic`, or
+`suspended` — assigning roles is in scope, authoring them is not, so any other
+value is a `400` and an unknown user is a `404`. It takes effect on that
+human's Agents' **next** gateway call, with no token event of any kind, because
+permissions are read from the store per call and were never in the credential.
+The three `/api/operator/*` reads are the Operator Console's data: the whole
+decision timeline, sessions projected to their claims (the raw credential is in
+no payload), and document metadata without content.
+
 The Agent Access Gateway adds an **agent-facing** surface under `/gateway`.
 It is deliberately outside the `/api/*` auth hook: agents authenticate with
 their own run credential (`RUN_JWT`), not the browser's shared demo token.
 
 | Method | Path                        | Purpose                                                                                      |
 | ------ | --------------------------- | -------------------------------------------------------------------------------------------- |
-| POST   | `/gateway/v1/responses`     | Model proxy: verifies the run session, injects the Ark key, streams the reply through        |
+| POST   | `/gateway/v1/responses`     | Model proxy: verifies the run session, applies `can()`, injects the Ark key, streams through |
 | ALL    | `/gateway/v1/tools/:tool/*` | Tool proxy: verifies the run session, resolves the principal, applies `can()`, then forwards |
 
 `:tool` is `docs`, `search`, or `payments`; anything else is a `403`. The proxy
@@ -210,9 +235,12 @@ When adding an endpoint, update this table **and** the one in
    conversations continuous.
 5. Codex calls `POST /gateway/v1/responses` on this server — not Ark directly.
    The gateway verifies the credential against its `RunSession` (signature,
-   expiry, `revoked`), then swaps it for the Ark key and streams the upstream
-   reply back unmodified. Anything unverifiable is a `401` with no upstream
-   call. Codex may also write files and run commands in the Agent's workspace.
+   expiry, `revoked`), resolves the `Principal` from the Agent's current owner
+   and runs `can(principal, "model")`, then swaps the credential for the Ark key
+   and streams the upstream reply back unmodified. Anything unverifiable is a
+   `401` and any role that does not grant `model` is a `403`, both with no
+   upstream call — so a `suspended` owner's Agent cannot spend tokens either.
+   Codex may also write files and run commands in the Agent's workspace.
 6. A tool call goes to `/gateway/v1/tools/:tool/*` instead. The gateway verifies
    the same credential, then resolves the `Principal` from the Agent's **current
    owner** in the store — permissions are never in the token — and runs
@@ -232,19 +260,28 @@ When adding an endpoint, update this table **and** the one in
 `.env` is gitignored. `.env.example` is the documented template and the README
 carries the summary table. Key variables:
 
-| Variable                  | Default           | Purpose                                  |
-| ------------------------- | ----------------- | ---------------------------------------- |
-| `ARK_API_KEY`             | required          | Ark model API key                        |
-| `ARK_MODEL`               | required          | Responses-capable endpoint ID (`ep-...`) |
-| `APP_AUTH_TOKEN`          | empty             | Shared demo token; 24+ chars if remote   |
-| `GATEWAY_JWT_SECRET`      | required          | Signs per-run gateway credentials (16+)  |
-| `GATEWAY_TOOL_CREDENTIAL` | per-process       | Gateway → mock tool service; optional    |
-| `RUNTIME_PROVIDER`        | `local-process`   | `container` for disposable local Runtime |
-| `CODEX_SANDBOX_MODE`      | `workspace-write` | Codex inner sandbox mode                 |
-| `CODEX_TIMEOUT_MS`        | `600000`          | Max duration of one turn                 |
+| Variable                  | Default           | Purpose                                   |
+| ------------------------- | ----------------- | ----------------------------------------- |
+| `ARK_API_KEY`             | required          | Ark model API key                         |
+| `ARK_MODEL`               | required          | Responses-capable endpoint ID (`ep-...`)  |
+| `APP_AUTH_TOKEN`          | empty             | Shared demo token; 24+ chars if remote    |
+| `GATEWAY_JWT_SECRET`      | required          | Signs per-run gateway credentials (16+)   |
+| `GATEWAY_TOOL_CREDENTIAL` | per-process       | Gateway → mock tool service; optional     |
+| `RUNTIME_PROVIDER`        | `local-process`   | `container` for disposable local Runtime  |
+| `CODEX_SANDBOX_MODE`      | `workspace-write` | Codex inner sandbox mode                  |
+| `CODEX_TIMEOUT_MS`        | `600000`          | Max duration of one turn                  |
+| `SESSION_TTL_MS`          | `660000`          | How long a run's gateway credential lives |
 
 `config.ts` runs every path through `path.resolve`. This is why tests must not
 hardcode POSIX paths — see the platform note under Testing.
+
+`SESSION_TTL_MS` is how long a run's gateway credential stays usable, minted
+into the `RunSession` and the token's `exp` together. It has its own variable
+rather than trailing `CODEX_TIMEOUT_MS` by a margin, because a credential's
+lifetime is a security decision and should be shortenable without shortening
+what a turn may take. The default (`660000`) is exactly what the old
+`CODEX_TIMEOUT_MS + 60_000` coupling produced, so naming it changed nothing;
+values under a second, or values that are not numbers, fail at boot.
 
 `GATEWAY_JWT_SECRET` is the gateway's HS256 signing key for per-run
 credentials. It is **required**: `loadConfig` throws when it is missing, under
@@ -301,10 +338,12 @@ These are load-bearing. Breaking one costs hackathon points directly:
    request — and must keep asserting both.
 10. **Authorization is decided server-side, per call, from stored ownership.**
     Permissions are never in the run credential: the gateway resolves the
-    principal from the Agent's current owner and calls `can()` on every tool
-    call, so a denial is a `403` with the tool untouched. The mock tool service
-    is reachable only with `GATEWAY_TOOL_CREDENTIAL`, which is what makes
-    skipping the gateway a refusal rather than a shortcut.
+    principal from the Agent's current owner and calls `can()` on every call —
+    the model included — so a denial is a `403` with nothing forwarded. A role
+    change therefore lands on the next call rather than at token expiry, which
+    is what makes `suspended` total and the mid-run role flip real. The mock
+    tool service is reachable only with `GATEWAY_TOOL_CREDENTIAL`, which is what
+    makes skipping the gateway a refusal rather than a shortcut.
 11. **Every gateway decision leaves exactly one redacted record, written before
     the answer.** `AuditLog` is the only writer, identity comes from stored
     ownership rather than from a credential's claims, and no request or
@@ -400,9 +439,19 @@ to do, on whose authority, and why.
   masking in `audit.ts`, which removes the Ark key, `GATEWAY_JWT_SECRET`,
   `GATEWAY_TOOL_CREDENTIAL`, anything shaped like a bearer header or a signed
   token, and bounds each field's length.
-- **Read per Run.** `GET /api/runs/:id/audit` returns that Run's records
-  ordered by `ts`, behind `APP_AUTH_TOKEN` like the rest of `/api`. Unknown Run
-  → `404`. It is the evidence panel's data source.
+- **Read per Run, and across all of them.** `GET /api/runs/:id/audit` returns
+  that Run's records ordered by `ts`, behind `APP_AUTH_TOKEN` like the rest of
+  `/api`. Unknown Run → `404`. It is the evidence panel's data source.
+  `GET /api/operator/audit` returns the same records for every Agent and Run in
+  one timeline, which is what the Operator Console's decision feed reads: a
+  denial is often only legible beside what the same human was allowed a moment
+  earlier.
+- **What is not audited.** An operator's own actions. `AuditRecord` belongs to a
+  Run, and a role change or a revocation has none — so a `PATCH /api/users/:id`
+  leaves no record, and the change is visible only in its effect on the next
+  decision. Accepted for demo scope and recorded in
+  [SECURITY.md](SECURITY.md); a record naming no run would be worse than the
+  gap it papers over.
 
 Token metering is separate and unchanged: `RunUsage` is parsed from Codex
 output. Per-call usage is deliberately not parsed out of the SSE stream.

@@ -29,8 +29,16 @@ it. A dev user switcher names the seeded human a request acts as — sent as
 is what a created Agent's `ownerId` is stamped from; each Agent is labelled with
 its owner. A per-Run evidence panel in the Playground reads
 `GET /api/runs/:id/audit` alongside the Run polling and renders that Run's
-decisions, denials distinguished, beside its token usage. Both are display-only:
-every row they show was enforced server-side before the Agent was answered.
+decisions, denials distinguished, beside its token usage. An Operator Console
+reads `GET /api/operator/{audit,sessions,docs}` and shows the same evidence
+across every Agent and Run, beside the run sessions (as claims — never the
+credential), the documents that exist and who owns them (metadata — never
+content), and each human's role. Its two controls trigger endpoints that
+already exist: `POST /api/agents/:id/revoke` and `PATCH /api/users/:id`. All
+three surfaces are display-and-trigger only: every row they show was enforced
+server-side before the Agent was answered, and neither lever decides anything
+in the browser. The console is deliberately not gated by the `admin` role —
+under mock authentication that would be theater.
 
 ### Fastify API
 
@@ -50,20 +58,26 @@ within its own expiry, and agree with the token about which run and Agent are
 calling. Any failure is a `401` with no upstream request at all. Because the
 session — not the token — is the source of truth, `POST /api/agents/:id/revoke`
 stops an Agent's next call mid-run without reaching into a running container.
+`SESSION_TTL_MS` decides how long a session is minted for; revocation does not
+wait for it.
 
-On success the gateway replaces that credential with the Ark key and forwards to
-`${ARK_BASE_URL}/responses`, streaming the upstream response through unmodified
-so server-sent events reach Codex as they arrive. The upstream key therefore
-never enters an Agent Runtime.
+An authenticated call is then authorized. The gateway resolves a `Principal`
+from the Agent's **current owner** in the store — permissions are deliberately
+kept out of the credential, so a role change or a re-owned Agent takes effect on
+the next call rather than at expiry — and applies
+`can(principal, tool, resource?)` from `apps/server/src/authz.ts`. The model is
+one of those tools: `POST /gateway/v1/responses` runs `can(principal, "model")`
+before it forwards, which is what makes the `suspended` role (an empty grant
+list) total rather than tool-only — a suspended owner's Agent cannot spend model
+tokens either. Only on allow does the gateway replace the run credential with
+the Ark key and forward to `${ARK_BASE_URL}/responses`, streaming the upstream
+response through unmodified so server-sent events reach Codex as they arrive.
+The upstream key therefore never enters an Agent Runtime.
 
 Tool calls take `ALL /gateway/v1/tools/:tool/*` and pass through the same
-verification first, then an authorization step the model proxy has no need of.
-The gateway resolves a `Principal` from the Agent's **current owner** in the
-store — permissions are deliberately kept out of the credential, so a role
-change or a re-owned Agent takes effect on the next call rather than at expiry —
-and applies `can(principal, tool, resource?)` from `apps/server/src/authz.ts`.
-Ownership-scoped tools resolve the target's owner as the resource; `docs` is the
-one that does. Only on allow does the gateway attach `GATEWAY_TOOL_CREDENTIAL`
+verification and the same authorization step, with one addition: an
+ownership-scoped tool resolves the target's owner as the resource, and `docs` is
+the one that does. Only on allow does the gateway attach `GATEWAY_TOOL_CREDENTIAL`
 and forward to the mock tool service in `apps/server/src/mock-tools.ts`. A
 denial is a `403` and the tool is never reached, and because the tool service
 refuses anything without that credential, the check cannot be walked around by
@@ -79,7 +93,10 @@ gateway has just declined to trust, which is why a forged token naming no known
 session is denied and logged but files no record. Records hold the tool, the
 `resource` identifier, and the reason; no request or response body is stored,
 and both text fields are masked and length-bounded on the way to the store. The
-operator reads a Run's trail at `GET /api/runs/:id/audit`.
+operator reads a Run's trail at `GET /api/runs/:id/audit`, and every Run's at
+`GET /api/operator/audit`. Operator actions themselves — assigning a role,
+revoking a session — are not audited: a record belongs to a Run, and they have
+none (see [../SECURITY.md](../SECURITY.md)).
 
 `/gateway/*` sits outside the `/api/*` shared-token hook on purpose: the agent
 is a different principal from the browser operator. Because the origin depends
