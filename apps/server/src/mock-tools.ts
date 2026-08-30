@@ -1,6 +1,7 @@
 import { randomUUID, timingSafeEqual } from "node:crypto";
 import type { FastifyInstance } from "fastify";
 import { z } from "zod";
+import { visibleTo } from "./authz.js";
 import type { AppConfig } from "./config.js";
 import type { MockDoc } from "./types.js";
 
@@ -9,15 +10,24 @@ import type { MockDoc } from "./types.js";
 // authorization decision has somewhere to point: a denial is only meaningful
 // if there was something real on the other side of it.
 //
-// The service authenticates its caller and nothing more. It does not decide who
-// may read what — the gateway does, once, before forwarding — so there is one
-// place to read the policy from and one place a change to it lands.
+// The service authenticates its caller and applies the Scope it was handed. It
+// decides nothing: the gateway resolves the principal and computes the scope
+// once, before forwarding, and this service can only narrow what it returns —
+// it never sees a role and cannot widen anything. So there is still one place
+// to read the policy from and one place a change to it lands.
 
 /** Where the mock tool service is mounted. Reachable only with the credential. */
 export const MOCK_TOOLS_PREFIX = "/internal/tools";
 
 /** Carries the credential the gateway injects when it forwards a tool call. */
 export const TOOL_CREDENTIAL_HEADER = "x-launchpad-tool-credential";
+
+/**
+ * Carries the authorized Scope — the principal's owner id — beside the
+ * credential. The gateway decides it; this service applies it mechanically and
+ * can only ever narrow what it returns, because it never learns a role.
+ */
+export const TOOL_SCOPE_HEADER = "x-launchpad-scope";
 
 /**
  * The tools the gateway proxies. `model` is deliberately absent: it has its own
@@ -35,33 +45,11 @@ export function isProxyableTool(value: string): value is ProxyableTool {
 /** The documents the service can serve. The store owns the fixture itself. */
 export interface MockToolDirectory {
   findMockDoc(id: string): MockDoc | undefined;
+  listMockDocs(): MockDoc[];
 }
 
-/**
- * A small public corpus, unrelated to anybody's documents. `search` is not an
- * ownership-scoped tool, so what it returns must not depend on who is asking —
- * indexing user documents here would leak across owners by another door.
- */
-const SEARCH_CORPUS = [
-  {
-    id: "kb-1",
-    title: "Agent Access Gateway",
-    snippet:
-      "Agents call the platform gateway, which holds the credentials they do not.",
-  },
-  {
-    id: "kb-2",
-    title: "Run credentials",
-    snippet:
-      "Each run is issued a short-lived credential the control plane can revoke.",
-  },
-  {
-    id: "kb-3",
-    title: "Role-based tool access",
-    snippet:
-      "A role grants tools; ownership decides which resources those tools may touch.",
-  },
-];
+/** A result is a pointer to a document, not a copy of one. */
+const SNIPPET_LENGTH = 160;
 
 const searchQuery = z.object({ q: z.string().trim().max(200).default("") });
 
@@ -118,17 +106,45 @@ export async function registerMockTools(
         return { doc };
       });
 
-      scope.get("/search", async (request) => {
+      // Search reads the one real document collection, narrowed to the Scope
+      // the gateway decided. The predicate is `visibleTo` from authz.ts —
+      // imported, never reimplemented — so a row this route hides is a row the
+      // direct-fetch path hides too.
+      scope.get("/search", async (request, reply) => {
+        const authorizedScope = request.headers[TOOL_SCOPE_HEADER];
+        if (
+          typeof authorizedScope !== "string" ||
+          authorizedScope.trim().length === 0
+        ) {
+          // Fail closed. The gateway is the only caller and always sends a
+          // scope, so a missing one is a bug — and a bug must not be answered
+          // with every human's documents.
+          request.log.warn(
+            "Tool service refused a search that carried no authorized scope",
+          );
+          return reply.code(400).send({ error: "Tool scope required" });
+        }
         const { q } = searchQuery.parse(request.query);
         const needle = q.toLowerCase();
         return {
           query: q,
-          results: SEARCH_CORPUS.filter(
-            (entry) =>
-              needle.length === 0 ||
-              entry.title.toLowerCase().includes(needle) ||
-              entry.snippet.toLowerCase().includes(needle),
-          ),
+          results: directory
+            .listMockDocs()
+            .filter((doc) => visibleTo(doc, authorizedScope))
+            .filter(
+              (doc) =>
+                needle.length === 0 ||
+                doc.title.toLowerCase().includes(needle) ||
+                doc.content.toLowerCase().includes(needle),
+            )
+            .map((doc) => ({
+              id: doc.id,
+              title: doc.title,
+              snippet:
+                doc.content.length > SNIPPET_LENGTH
+                  ? doc.content.slice(0, SNIPPET_LENGTH) + "…"
+                  : doc.content,
+            })),
         };
       });
 

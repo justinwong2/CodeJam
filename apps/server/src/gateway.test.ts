@@ -828,7 +828,12 @@ describe("Tool gateway", () => {
 
     const search = await callTool(app, runJwt, "search?q=gateway");
     expect(search.statusCode).toBe(200);
-    expect((search.json() as { results: unknown[] }).results.length).toBe(1);
+    // A's own private plan and the public entry, both of which mention it.
+    expect(
+      (search.json() as { results: { id: string }[] }).results.map(
+        (result) => result.id,
+      ),
+    ).toEqual(["doc-a1", "kb-1"]);
 
     const payment = await callTool(app, runJwt, "payments");
     expect(payment.statusCode).toBe(201);
@@ -968,6 +973,52 @@ describe("Tool gateway", () => {
 
     expect(response.statusCode).toBe(404);
     expect(fixture.toolCalls).toEqual([]);
+  });
+
+  it("scopes a search to what the calling principal may see", async () => {
+    // The scope is the gateway's decision, travelling in a header the agent
+    // cannot set: a filtered row is invisible in the answer, and the store
+    // still holds it — which is why the console's ground-truth table exists.
+    const fixture = await toolFixture();
+    const runJwt = await fixture.runAs("user-b");
+
+    const response = await callTool(fixture.app, runJwt, "search?q=notes");
+
+    expect(response.statusCode).toBe(200);
+    const results = (response.json() as { results: { id: string }[] }).results;
+    expect(results.map((result) => result.id)).toEqual(["doc-b1"]);
+    // A's private notes match the query and are absent anyway, with nothing in
+    // the body hinting they were ever considered.
+    expect(response.body).not.toContain("doc-a2");
+    expect(response.body).not.toContain("rollout order");
+    expect(fixture.service.findMockDoc("doc-a2")).toBeDefined();
+
+    // One record, and it says `search` — filtering is not a denial and leaves
+    // no per-row trace, which is exactly why ground truth is displayed beside
+    // it rather than inferred from the evidence.
+    expect(fixture.audit(fixture.runIds[0] ?? "")).toMatchObject([
+      { tool: "search", resource: "search", decision: "allow" },
+    ]);
+  });
+
+  it("gives an agent forging a scope header no say in what it sees", async () => {
+    const fixture = await toolFixture();
+    const runJwt = await fixture.runAs("user-b");
+
+    const response = await fixture.app.inject({
+      method: "GET",
+      url: "/gateway/v1/tools/search?q=quarterly",
+      headers: {
+        authorization: `Bearer ${runJwt}`,
+        // The header the tool service reads — set here by the caller, and
+        // replaced by the gateway with the scope it decided.
+        "x-launchpad-scope": "user-a",
+      },
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect((response.json() as { results: unknown[] }).results).toEqual([]);
+    expect(response.body).not.toContain("quarterly plan");
   });
 
   it("refuses a path that names no tool at all", async () => {

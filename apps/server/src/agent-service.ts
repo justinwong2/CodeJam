@@ -367,6 +367,15 @@ export class AgentService implements GatewayDirectory {
   }
 
   /**
+   * Every stored document, unscoped. The mock tool service narrows this to the
+   * Scope the gateway handed it; nothing else reads it, and nothing that reads
+   * it may answer without applying a scope.
+   */
+  listMockDocs(): MockDoc[] {
+    return this.store.select((database) => database.docs);
+  }
+
+  /**
    * One Run's evidence trail, oldest first. Scoped to the Run because that is
    * how it is read: beside the conversation it explains. A Run nobody started
    * is a 404 rather than an empty trail — an operator asking about the wrong

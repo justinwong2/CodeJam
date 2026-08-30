@@ -6,7 +6,11 @@ import { afterEach, describe, expect, it } from "vitest";
 import { AgentService } from "./agent-service.js";
 import { createApp } from "./app.js";
 import { loadConfig } from "./config.js";
-import { MOCK_TOOLS_PREFIX, TOOL_CREDENTIAL_HEADER } from "./mock-tools.js";
+import {
+  MOCK_TOOLS_PREFIX,
+  TOOL_CREDENTIAL_HEADER,
+  TOOL_SCOPE_HEADER,
+} from "./mock-tools.js";
 import { JsonStore, SEED_DOCS } from "./store.js";
 import { WorkspaceManager } from "./workspace.js";
 
@@ -134,22 +138,87 @@ describe("Mock tool service routes", () => {
     await app.close();
   });
 
-  it("searches a corpus that does not depend on who is asking", async () => {
+  it("refuses a search that carries no scope, and returns nothing", async () => {
+    // Only the gateway can reach this service, and the gateway always decides a
+    // scope — so a call without one is a bug, and a bug must not be answered
+    // with everybody's documents.
     const app = await toolApp();
     const response = await app.inject({
       method: "GET",
-      url: `${MOCK_TOOLS_PREFIX}/search?q=revoke`,
+      url: `${MOCK_TOOLS_PREFIX}/search?q=notes`,
       headers: withCredential,
     });
-    expect(response.statusCode).toBe(200);
-    const body = response.json() as {
+    expect(response.statusCode).toBe(400);
+    expect(response.json()).toEqual({ error: "Tool scope required" });
+    for (const doc of SEED_DOCS) {
+      expect(response.body).not.toContain(doc.content);
+      expect(response.body).not.toContain(doc.id);
+    }
+    await app.close();
+  });
+
+  it("returns only what the scope may see", async () => {
+    const app = await toolApp();
+    const asUserB = await app.inject({
+      method: "GET",
+      url: `${MOCK_TOOLS_PREFIX}/search`,
+      headers: { ...withCredential, [TOOL_SCOPE_HEADER]: "user-b" },
+    });
+
+    expect(asUserB.statusCode).toBe(200);
+    const seen = (asUserB.json() as { results: { id: string }[] }).results.map(
+      (result) => result.id,
+    );
+    // B's own document and every public one; A's private documents are absent,
+    // and absent without a trace — a filtered row is invisible, not refused.
+    expect(new Set(seen)).toEqual(new Set(["doc-b1", "kb-1", "kb-2", "kb-3"]));
+    for (const doc of SEED_DOCS.filter((item) => item.ownerId === "user-a")) {
+      if (doc.visibility === "private") {
+        expect(asUserB.body).not.toContain(doc.content);
+        expect(asUserB.body).not.toContain(doc.id);
+      }
+    }
+
+    const asUserA = await app.inject({
+      method: "GET",
+      url: `${MOCK_TOOLS_PREFIX}/search`,
+      headers: { ...withCredential, [TOOL_SCOPE_HEADER]: "user-a" },
+    });
+    const ownScope = (asUserA.json() as { results: { id: string }[] }).results;
+    // Nothing of A's is excluded from A's own search, and B's private document
+    // is not in it either.
+    expect(new Set(ownScope.map((result) => result.id))).toEqual(
+      new Set(["doc-a1", "doc-a2", "kb-1", "kb-2", "kb-3"]),
+    );
+    await app.close();
+  });
+
+  it("matches a query against the title and the content", async () => {
+    const app = await toolApp();
+    const scoped = { ...withCredential, [TOOL_SCOPE_HEADER]: "user-a" };
+
+    const byTitle = await app.inject({
+      method: "GET",
+      url: `${MOCK_TOOLS_PREFIX}/search?q=Role-based`,
+      headers: scoped,
+    });
+    expect(
+      (byTitle.json() as { results: { id: string }[] }).results.map(
+        (result) => result.id,
+      ),
+    ).toEqual(["kb-3"]);
+
+    const byContent = await app.inject({
+      method: "GET",
+      url: `${MOCK_TOOLS_PREFIX}/search?q=revoke`,
+      headers: scoped,
+    });
+    const body = byContent.json() as {
       query: string;
       results: { id: string }[];
     };
     expect(body.query).toBe("revoke");
     expect(body.results.map((result) => result.id)).toEqual(["kb-2"]);
-    // Nobody's documents are in the index, so search cannot leak across owners.
-    expect(response.body).not.toContain("quarterly plan");
     await app.close();
   });
 

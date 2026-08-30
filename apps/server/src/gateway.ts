@@ -7,6 +7,7 @@ import type { AppConfig } from "./config.js";
 import {
   MOCK_TOOLS_PREFIX,
   TOOL_CREDENTIAL_HEADER,
+  TOOL_SCOPE_HEADER,
   isProxyableTool,
   type ProxyableTool,
 } from "./mock-tools.js";
@@ -528,7 +529,7 @@ async function proxyTool(
     decision: "allow",
     reason: allowed,
   });
-  return forwardToTool(config, request, reply, tool, suffix);
+  return forwardToTool(config, request, reply, tool, suffix, principal.ownerId);
 }
 
 /**
@@ -577,10 +578,14 @@ async function invisible(
 }
 
 /**
- * The authorized call, and the only place the tool credential is attached. The
- * agent's own credential is deliberately not passed on: the tool service
- * answers to the gateway, and nothing downstream should be able to replay a run
- * token.
+ * The authorized call, and the only place the tool credential and the Scope are
+ * attached. The agent's own credential is deliberately not passed on: the tool
+ * service answers to the gateway, and nothing downstream should be able to
+ * replay a run token.
+ *
+ * `authorizedScope` is the principal's owner id as the gateway resolved it — a
+ * decision, not a claim. The tool applies it and cannot widen it; the response
+ * bytes come back unparsed, as ever.
  */
 async function forwardToTool(
   config: AppConfig,
@@ -588,6 +593,7 @@ async function forwardToTool(
   reply: FastifyReply,
   tool: ProxyableTool,
   suffix: string,
+  authorizedScope: string,
 ): Promise<FastifyReply> {
   const queryIndex = request.url.indexOf("?");
   const target =
@@ -604,6 +610,7 @@ async function forwardToTool(
     url: target,
     headers: {
       [TOOL_CREDENTIAL_HEADER]: config.gatewayToolCredential,
+      [TOOL_SCOPE_HEADER]: authorizedScope,
       ...(request.headers.accept ? { accept: request.headers.accept } : {}),
       ...(contentType ? { "content-type": contentType } : {}),
     },
