@@ -324,7 +324,7 @@ export default function App() {
   } | null>(null);
   const [busy, setBusy] = useState(false);
   const [showConsole, setShowConsole] = useState(false);
-  const [console_, setConsole] = useState<{
+  const [operatorData, setOperatorData] = useState<{
     audit: AuditRecord[];
     sessions: RunSessionClaims[];
     docs: MockDocMetadata[];
@@ -395,7 +395,7 @@ export default function App() {
       api.operatorDocs(),
       api.users(),
     ]);
-    setConsole({
+    setOperatorData({
       audit: audit.audit,
       sessions: sessions.sessions,
       docs: docs.docs,
@@ -878,9 +878,9 @@ export default function App() {
 
         {showConsole ? (
           <OperatorConsole
-            audit={console_.audit}
-            sessions={console_.sessions}
-            docs={console_.docs}
+            audit={operatorData.audit}
+            sessions={operatorData.sessions}
+            docs={operatorData.docs}
             users={users}
             ownerName={ownerName}
             onAssignRole={(id, role) => void assignRole(id, role)}
