@@ -130,7 +130,7 @@ inventing new ones:
 ### Web UI
 
 The browser is **not** one of those seams: it shows what the server decided and
-enforces nothing. Three pieces of it exist for the gateway, and all are
+enforces nothing. Four pieces of it exist for the gateway, and all are
 display-only on purpose — a UI-side check would score nothing and be bypassed by
 any client that is not this one.
 
@@ -155,39 +155,48 @@ any client that is not this one.
   deliberately **not** gated by the `admin` role: mock authentication makes
   role-gating an operator surface theater. Use "operator" for the surface and
   "admin" only for the role.
+- **Documents panel.** A third view in `App.tsx`. It lists what
+  `GET /api/docs` answered for the acting human — own plus public, each row
+  labelled with its owner and visibility — and uploads through `POST /api/docs`
+  with a visibility chosen at creation. It filters nothing (the server scopes the
+  listing with the same `visibleTo` an Agent's search is scoped by) and names no
+  owner (the server stamps the acting human). Switching the acting user re-reads
+  the endpoint, which is the demonstration: one predicate, two callers.
 
 `apps/web/src/types.ts` mirrors the server's `User`, `Role`, `AuditRecord`,
-`RunSessionClaims`, `MockDocMetadata`, and `Agent.ownerId`. The server's
-`types.ts` is canonical; keep the two in sync.
+`RunSessionClaims`, `MockDocMetadata`, `MockDoc`, `Visibility`, and
+`Agent.ownerId`. The server's `types.ts` is canonical; keep the two in sync.
 
 ## API Endpoints
 
 All under `/api`. Auth is a single optional shared bearer token
 (`APP_AUTH_TOKEN`) — it is **not** a user identity system.
 
-| Method | Path                       | Purpose                              |
-| ------ | -------------------------- | ------------------------------------ |
-| GET    | `/api/health`              | Liveness probe                       |
-| GET    | `/api/auth`                | Whether a token is required          |
-| GET    | `/api/system`              | Runtime/engine diagnostics           |
-| GET    | `/api/users`               | Seeded users for the dev switcher    |
-| PATCH  | `/api/users/:id`           | Assign a seeded role: `{ role }`     |
-| GET    | `/api/operator/audit`      | Every Run's decisions, by `ts`       |
-| GET    | `/api/operator/sessions`   | Run sessions as claims, newest first |
-| GET    | `/api/operator/docs`       | Document metadata: id and owner      |
-| GET    | `/api/agents`              | List Agents                          |
-| POST   | `/api/agents`              | Create an Agent                      |
-| GET    | `/api/agents/:id`          | Get one Agent                        |
-| PATCH  | `/api/agents/:id`          | Update an Agent                      |
-| DELETE | `/api/agents/:id`          | Delete; archives workspace           |
-| POST   | `/api/agents/:id/start`    | Lifecycle: start                     |
-| POST   | `/api/agents/:id/stop`     | Lifecycle: stop                      |
-| GET    | `/api/agents/:id/messages` | Conversation history                 |
-| GET    | `/api/agents/:id/runs`     | Run history                          |
-| POST   | `/api/agents/:id/messages` | Send a task; creates an async Run    |
-| POST   | `/api/agents/:id/revoke`   | Revoke the Agent's live run sessions |
-| GET    | `/api/runs/:id`            | Poll Run status (the UI polls this)  |
-| GET    | `/api/runs/:id/audit`      | The Run's gateway decisions, by `ts` |
+| Method | Path                       | Purpose                                 |
+| ------ | -------------------------- | --------------------------------------- |
+| GET    | `/api/health`              | Liveness probe                          |
+| GET    | `/api/auth`                | Whether a token is required             |
+| GET    | `/api/system`              | Runtime/engine diagnostics              |
+| GET    | `/api/users`               | Seeded users for the dev switcher       |
+| GET    | `/api/docs`                | Documents the acting human may see      |
+| POST   | `/api/docs`                | Upload `{ title, content, visibility }` |
+| PATCH  | `/api/users/:id`           | Assign a seeded role: `{ role }`        |
+| GET    | `/api/operator/audit`      | Every Run's decisions, by `ts`          |
+| GET    | `/api/operator/sessions`   | Run sessions as claims, newest first    |
+| GET    | `/api/operator/docs`       | Document metadata, never content        |
+| GET    | `/api/agents`              | List Agents                             |
+| POST   | `/api/agents`              | Create an Agent                         |
+| GET    | `/api/agents/:id`          | Get one Agent                           |
+| PATCH  | `/api/agents/:id`          | Update an Agent                         |
+| DELETE | `/api/agents/:id`          | Delete; archives workspace              |
+| POST   | `/api/agents/:id/start`    | Lifecycle: start                        |
+| POST   | `/api/agents/:id/stop`     | Lifecycle: stop                         |
+| GET    | `/api/agents/:id/messages` | Conversation history                    |
+| GET    | `/api/agents/:id/runs`     | Run history                             |
+| POST   | `/api/agents/:id/messages` | Send a task; creates an async Run       |
+| POST   | `/api/agents/:id/revoke`   | Revoke the Agent's live run sessions    |
+| GET    | `/api/runs/:id`            | Poll Run status (the UI polls this)     |
+| GET    | `/api/runs/:id/audit`      | The Run's gateway decisions, by `ts`    |
 
 Browser requests name the human they act as with an `x-launchpad-user` header
 (a seeded user id; `user-a` when absent, `400` when unknown). This is mock
@@ -202,7 +211,17 @@ human's Agents' **next** gateway call, with no token event of any kind, because
 permissions are read from the store per call and were never in the credential.
 The three `/api/operator/*` reads are the Operator Console's data: the whole
 decision timeline, sessions projected to their claims (the raw credential is in
-no payload), and document metadata without content.
+no payload), and document metadata — id, title, owner, visibility — without
+content.
+
+The two `/api/docs` routes are the human half of the document surface.
+`GET` answers with the documents the acting human may see, scoped by the same
+`visibleTo` predicate the gateway scopes an Agent's search with — there is
+deliberately no operator override on this surface; the console's metadata-only
+table is the all-seeing view. `POST` is create-only Upload: a title, a few KB of
+plain text, and a visibility fixed at creation. The id is generated server-side
+and the owner is the acting human — an `ownerId` in the body is a `400`, never a
+field that is honored. There is no edit, delete, or visibility toggle.
 
 The Agent Access Gateway adds an **agent-facing** surface under `/gateway`.
 It is deliberately outside the `/api/*` auth hook: agents authenticate with
@@ -244,16 +263,28 @@ When adding an endpoint, update this table **and** the one in
 6. A tool call goes to `/gateway/v1/tools/:tool/*` instead. The gateway verifies
    the same credential, then resolves the `Principal` from the Agent's **current
    owner** in the store — permissions are never in the token — and runs
-   `can(principal, tool, resource?)`. Only on allow does it attach
-   `GATEWAY_TOOL_CREDENTIAL` and forward; a denial is a `403` and the tool is
-   never called.
-7. Whichever way it went, the decision is written to `audit: AuditRecord[]`
+   `can(principal, tool, resource?)`, where a `docs` resource is the document's
+   `{ ownerId, visibility }` and the rule is "owned OR public". Only on allow
+   does it attach `GATEWAY_TOOL_CREDENTIAL` **and** the principal's owner id in
+   `x-launchpad-scope`, then forward; a denial is a `403` and the tool is never
+   called. The one divergence is a document the principal may not read: the
+   answer is `404 { error: "Document not found" }`, byte-identical to an unknown
+   id, because such a document must be _invisible_ rather than merely denied —
+   the audit row still carries the true ownership reason
+   ([ADR](docs/adr/2026-08-30-invisible-documents.md)).
+7. `search` is scoped rather than denied. The tool service filters the stored
+   documents with the same `visibleTo` from `authz.ts` — imported, never copied
+   — and refuses a call arriving without `x-launchpad-scope`, since the gateway
+   is its only caller and always decides one. The gateway never parses the
+   response, so a filtered-out row leaves no decision of its own: the Operator
+   Console's ground-truth table is what a scoped answer is read against.
+8. Whichever way it went, the decision is written to `audit: AuditRecord[]`
    through `AuditLog` **before** the answer is sent, so the store is never
    behind what the agent has been told.
-8. The runner returns a `RunnerResult`; the service persists the assistant
+9. The runner returns a `RunnerResult`; the service persists the assistant
    message and terminal Run state, and expires the run's session.
-9. The UI polls `/api/runs/:id` until the Run reaches a terminal status, and
-   reads `/api/runs/:id/audit` for what the gateway decided along the way.
+10. The UI polls `/api/runs/:id` until the Run reaches a terminal status, and
+    reads `/api/runs/:id/audit` for what the gateway decided along the way.
 
 ## Configuration
 
@@ -347,8 +378,20 @@ These are load-bearing. Breaking one costs hackathon points directly:
 11. **Every gateway decision leaves exactly one redacted record, written before
     the answer.** `AuditLog` is the only writer, identity comes from stored
     ownership rather than from a credential's claims, and no request or
-    response body is persisted. `audit.test.ts` and `gateway.test.ts` assert
-    the redaction and the one-record-per-decision rule and must keep doing so.
+    response body is persisted — a document's content must never reach an audit
+    field. `audit.test.ts` and `gateway.test.ts` assert the redaction and the
+    one-record-per-decision rule and must keep doing so.
+12. **A document nobody may read is invisible, not denied.** An ownership denial
+    on `docs` answers the same `404 { error: "Document not found" }` — status and
+    bytes — that an unknown id answers, while the audit row carries the true
+    reason. `gateway.test.ts` compares the two responses byte for byte and must
+    keep doing so. Tool-RBAC denials stay `403`: they name a tool, not a
+    resource.
+13. **`visibleTo()` exists exactly once**, in `authz.ts`, and both callers import
+    it — the gateway for a direct fetch, the mock tool service for a scoped
+    search. A second copy is how search starts returning rows the fetch path
+    hides. Scope travels in `x-launchpad-scope`, is attached only by the gateway
+    when forwarding, and a tool call missing it is refused.
 
 ## Security And Data Handling
 
@@ -435,10 +478,22 @@ to do, on whose authority, and why.
   to file it under. The same applies to a path naming nothing that is a
   `ToolName`.
 - **Redacted by construction.** No request or response body is stored, only the
-  `resource` identifier (`docs/doc-b1`) and the reason. Both go through the
-  masking in `audit.ts`, which removes the Ark key, `GATEWAY_JWT_SECRET`,
-  `GATEWAY_TOOL_CREDENTIAL`, anything shaped like a bearer header or a signed
-  token, and bounds each field's length.
+  `resource` identifier (`docs/doc-b1`) and the reason. A document's title and
+  content are body, not identifier, and reach no field. Both stored fields go
+  through the masking in `audit.ts`, which removes the Ark key,
+  `GATEWAY_JWT_SECRET`, `GATEWAY_TOOL_CREDENTIAL`, anything shaped like a bearer
+  header or a signed token, and bounds each field's length.
+- **The record and the answer may diverge, and the record is the truth.** An
+  ownership denial on `docs` tells the agent `404 Document not found` — the same
+  answer an unknown id gets, because such a document must be invisible — and
+  files `deny` with `can()`'s real ownership reason. The two are meant to
+  disagree: the agent learns nothing, the operator learns everything. Debugging a
+  404 therefore means reading the evidence panel, which is what it is for.
+- **Scoped search leaves no per-row trace.** A search is one `allow` for the
+  tool; the rows the Scope excluded produce no records, because no decision was
+  reached about them individually. That is why the Operator Console shows the
+  ground-truth document table beside the feed — "five documents exist, B's search
+  returned three" is a claim the audit trail alone cannot support.
 - **Read per Run, and across all of them.** `GET /api/runs/:id/audit` returns
   that Run's records ordered by `ts`, behind `APP_AUTH_TOKEN` like the rest of
   `/api`. Unknown Run → `404`. It is the evidence panel's data source.

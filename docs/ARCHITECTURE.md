@@ -32,13 +32,18 @@ its owner. A per-Run evidence panel in the Playground reads
 decisions, denials distinguished, beside its token usage. An Operator Console
 reads `GET /api/operator/{audit,sessions,docs}` and shows the same evidence
 across every Agent and Run, beside the run sessions (as claims — never the
-credential), the documents that exist and who owns them (metadata — never
-content), and each human's role. Its two controls trigger endpoints that
-already exist: `POST /api/agents/:id/revoke` and `PATCH /api/users/:id`. All
-three surfaces are display-and-trigger only: every row they show was enforced
-server-side before the Agent was answered, and neither lever decides anything
-in the browser. The console is deliberately not gated by the `admin` role —
-under mock authentication that would be theater.
+credential), the documents that exist with their titles, owners, and visibility
+(metadata — never content), and each human's role. Its two controls trigger
+endpoints that already exist: `POST /api/agents/:id/revoke` and
+`PATCH /api/users/:id`. A Documents panel is the fourth surface: it lists what
+`GET /api/docs` answered for the acting human — their own documents plus every
+public one, scoped server-side by the same predicate an Agent's search is scoped
+by — and uploads through `POST /api/docs`, where the server generates the id,
+stamps the acting human as owner, and fixes the visibility at creation. All four
+surfaces are display-and-trigger only: every row they show was enforced or scoped
+server-side before the browser saw it, and no lever decides anything here. The
+console is deliberately not gated by the `admin` role — under mock authentication
+that would be theater.
 
 ### Fastify API
 
@@ -76,12 +81,26 @@ The upstream key therefore never enters an Agent Runtime.
 
 Tool calls take `ALL /gateway/v1/tools/:tool/*` and pass through the same
 verification and the same authorization step, with one addition: an
-ownership-scoped tool resolves the target's owner as the resource, and `docs` is
-the one that does. Only on allow does the gateway attach `GATEWAY_TOOL_CREDENTIAL`
-and forward to the mock tool service in `apps/server/src/mock-tools.ts`. A
-denial is a `403` and the tool is never reached, and because the tool service
-refuses anything without that credential, the check cannot be walked around by
-calling it directly.
+ownership-scoped tool resolves the target's `{ ownerId, visibility }` as the
+resource, and `docs` is the one that does. The rule is "owned OR public",
+expressed once as `visibleTo()` in `authz.ts`. Only on allow does the gateway
+attach `GATEWAY_TOOL_CREDENTIAL` — plus the principal's owner id in
+`x-launchpad-scope` — and forward to the mock tool service in
+`apps/server/src/mock-tools.ts`. A denial is a `403` and the tool is never
+reached, and because the tool service refuses anything without that credential,
+the check cannot be walked around by calling it directly.
+
+Two refinements follow from documents being user data whose _existence_ is also
+user data. A `docs` ownership denial answers `404 { error: "Document not
+found" }`, byte-identical to an unknown id, so an Agent enumerating ids meets a
+uniform wall rather than a one-bit oracle; the audit row still carries the real
+ownership reason
+([ADR](adr/2026-08-30-invisible-documents.md)). And `search` is scoped rather
+than denied: the tool service filters the stored documents with the same
+imported `visibleTo` against the header the gateway sent, and refuses a call
+carrying no scope — the gateway is its only caller and always decides one. The
+gateway never parses the response bytes, so it never learns which rows were
+excluded.
 
 Whichever route was taken and whichever way it went, the gateway files exactly
 one record through `AuditLog` in `apps/server/src/audit.ts` **before** it

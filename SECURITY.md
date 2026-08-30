@@ -39,6 +39,24 @@ credentials, personal data, or exploit details in an issue.
   credential is identity, never permission. The mock tool service accepts only
   calls carrying `GATEWAY_TOOL_CREDENTIAL`, which never leaves the server
   process, so the check cannot be walked around by calling the tool directly.
+- Existence is treated as user data. A document an Agent's owner may not read is
+  **invisible**, not merely refused: a direct fetch through the gateway answers
+  the same `404 { error: "Document not found" }` — status and bytes — that a
+  nonexistent id answers, so an Agent guessing ids cannot tell a wrong guess from
+  a forbidden hit and cannot map another human's documents or learn who owns
+  what. Search is scoped the same way: rows the caller may not see are absent
+  rather than denied, and the tool service refuses a call that arrives without
+  the gateway-computed scope header. The audit trail still records the true
+  reason (`deny`, naming the owner), so the operator's view and the Agent's view
+  deliberately differ — the Agent learns nothing, the operator learns
+  everything. Not addressed: response-time uniformity between the two `404`
+  paths, which is a timing side channel left out of POC scope.
+- Documents uploaded from the browser are stored as-is, in the same JSON store,
+  as a few KB of plain text with a visibility fixed at creation. The owner is the
+  acting human resolved server-side — never a field of the request body — and
+  there is no edit, delete, toggle, or sharing. Content is only ever returned to
+  a principal `visibleTo` admits: it appears in no audit record, and in no
+  operator view.
 - Operator actions are not audited. `PATCH /api/users/:id` (assign a role) and
   `POST /api/agents/:id/revoke` leave no `AuditRecord`, because a record belongs
   to a Run and an operator action has none. Their effect is visible in the very
@@ -53,8 +71,10 @@ credentials, personal data, or exploit details in an issue.
   already made and triggers two endpoints the server already guards. Its
   session view is claims only — `jti`, agent, owner, run, issued, expires,
   revoked — and the raw run credential appears in no payload and renders
-  nowhere. Its document table is metadata only: ids and owners, never content,
-  so it is not a way around the ownership rule the gateway enforces.
+  nowhere. Its document table is metadata only — id, title, owner, visibility,
+  never content — so it is not a way around the visibility rule the gateway
+  enforces. The user-facing listing (`GET /api/docs`) has no operator override at
+  all: it is scoped by the same predicate, for whoever is acting.
 - Every gateway decision is recorded before the answer is sent, and the record
   is a decision rather than a payload. It holds the acting human, Agent, and
   Run, the tool, the `resource` identifier it named (`docs/doc-b1`), the

@@ -38,8 +38,14 @@ Summary — canonical list is in [CLAUDE.md](CLAUDE.md#invariants-to-preserve).
    upstream is never called.
 10. Authorization is decided per call from stored ownership, not from the token:
     a denied call is `403` and nothing is forwarded — tools or the model. A role
-    change therefore takes effect on the next call, with no token event.
-11. Every gateway decision leaves exactly one redacted audit record, written
+    change therefore takes effect on the next call, with no token event. The one
+    exception to `403` is a document the principal may not read: it is
+    _invisible_, so the answer is the same `404` a nonexistent id gets while the
+    audit row carries the true ownership reason.
+11. Visibility is decided by one predicate, `visibleTo()` in `authz.ts`, imported
+    by the gateway (direct fetch) and the mock tool service (search Scope). Never
+    a second copy: a drifting copy is how search leaks what a fetch hides.
+12. Every gateway decision leaves exactly one redacted audit record, written
     before the answer is sent. No request or response body is persisted.
 
 ## Repo Map
@@ -65,15 +71,17 @@ Summary — canonical list is in [CLAUDE.md](CLAUDE.md#invariants-to-preserve).
 Browser-facing routes live under `/api/*` behind the shared demo token,
 including the operator's kill switch:
 
-| Method | Path                     | Purpose                                        |
-| ------ | ------------------------ | ---------------------------------------------- |
-| GET    | `/api/users`             | Seeded users for the dev user switcher         |
-| PATCH  | `/api/users/:id`         | Assign a seeded role: `{ role }`; 404 / 400    |
-| POST   | `/api/agents/:id/revoke` | Revoke the Agent's live run sessions mid-run   |
-| GET    | `/api/runs/:id/audit`    | That Run's gateway decisions, ordered by `ts`  |
-| GET    | `/api/operator/audit`    | Every Run's decisions in one feed, by `ts`     |
-| GET    | `/api/operator/sessions` | Run sessions as claims — never the credential  |
-| GET    | `/api/operator/docs`     | Document metadata: id and owner, never content |
+| Method | Path                     | Purpose                                           |
+| ------ | ------------------------ | ------------------------------------------------- |
+| GET    | `/api/users`             | Seeded users for the dev user switcher            |
+| PATCH  | `/api/users/:id`         | Assign a seeded role: `{ role }`; 404 / 400       |
+| POST   | `/api/agents/:id/revoke` | Revoke the Agent's live run sessions mid-run      |
+| GET    | `/api/docs`              | Documents the acting human may see (own + public) |
+| POST   | `/api/docs`              | Upload: `{ title, content, visibility }`, 201     |
+| GET    | `/api/runs/:id/audit`    | That Run's gateway decisions, ordered by `ts`     |
+| GET    | `/api/operator/audit`    | Every Run's decisions in one feed, by `ts`        |
+| GET    | `/api/operator/sessions` | Run sessions as claims — never the credential     |
+| GET    | `/api/operator/docs`     | Document metadata — id, title, owner, visibility  |
 
 Browser requests name the acting human with `x-launchpad-user` (a seeded user
 id; `user-a` when absent, `400` when unknown). It sets a created Agent's
@@ -87,6 +95,11 @@ already exist (revoke a session, assign a role). It is deliberately not gated by
 the `admin` role — mock auth makes role-gating an operator surface theater —
 and it enforces nothing. "Operator" is the surface; "admin" is only the role.
 
+The Documents panel is the fourth, and the same kind of thing again: it lists
+what `GET /api/docs` answered for the acting human and uploads through
+`POST /api/docs`. It filters nothing and chooses no owner — the server scopes the
+listing and stamps the owner, and switching the acting user simply asks again.
+
 The agent-facing gateway is separate and deliberately outside that hook —
 agents authenticate with their own per-run credential, which the control plane
 mints and can revoke:
@@ -99,8 +112,12 @@ mints and can revoke:
 `:tool` is `docs`, `search`, or `payments`. The role comes from the Agent's
 current owner in the store, never from the token, so a denial is a `403` and
 nothing is forwarded — including on the model route, which is what makes the
-`suspended` role (no tools at all) total rather than tool-only. Forwarding
-targets the mock tool service at
+`suspended` role (no tools at all) total rather than tool-only. A `docs`
+ownership denial is the exception: it answers `404 { error: "Document not
+found" }`, byte-identical to an unknown id, and files the real reason. Search is
+scoped rather than denied — the gateway sends the principal's owner id in
+`x-launchpad-scope`, and the tool service filters with the same `visibleTo` and
+refuses a call that carries no scope. Forwarding targets the mock tool service at
 `/internal/tools/*`, which accepts only calls carrying
 `GATEWAY_TOOL_CREDENTIAL` — the credential is what makes skipping the gateway a
 refusal rather than a shortcut.
