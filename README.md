@@ -255,6 +255,10 @@ flowchart LR
 
 Codex never holds the Ark key: it calls the gateway with a run credential, and
 the gateway attaches the real key on the way upstream, streaming the reply back.
+Tool calls take the same gateway and are authorized against the Agent owner's
+role and the resource's owner before anything is forwarded. Every decision —
+allowed or denied — is recorded before the answer is sent, and a Run's trail is
+readable at `GET /api/runs/:id/audit`.
 
 The first turn uses `codex exec`; later turns resume the stored Codex thread.
 Deleting an Agent archives its workspace under `workspaces/.deleted/`.

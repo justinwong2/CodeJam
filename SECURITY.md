@@ -34,6 +34,17 @@ credentials, personal data, or exploit details in an issue.
   called. The mock tool service accepts only calls carrying
   `GATEWAY_TOOL_CREDENTIAL`, which never leaves the server process, so the
   check cannot be walked around by calling the tool directly.
+- Every gateway decision is recorded before the answer is sent, and the record
+  is a decision rather than a payload. It holds the acting human, Agent, and
+  Run, the tool, the `resource` identifier it named (`docs/doc-b1`), the
+  allow/deny outcome, and the reason. It does **not** hold prompts, model
+  replies, tool request or response bodies, query strings, headers, or the run
+  credential. Reason and resource are masked on the way to the store — the Ark
+  key, `GATEWAY_JWT_SECRET`, `GATEWAY_TOOL_CREDENTIAL`, bearer headers, and
+  token-shaped values — and both fields are length-bounded, so a body cannot be
+  smuggled into one. The trail still names humans, Agents, and what they were
+  refused, so `GET /api/runs/:id/audit` sits behind `APP_AUTH_TOKEN` with the
+  rest of `/api` and is never readable by an Agent.
 - Run credentials are bearer tokens carried over plain HTTP between the Runtime
   container and the host gateway. They are per-run, revocable, and expire with
   the turn, but anyone who can read that local traffic during a run can replay

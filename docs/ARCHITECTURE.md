@@ -60,6 +60,18 @@ denial is a `403` and the tool is never reached, and because the tool service
 refuses anything without that credential, the check cannot be walked around by
 calling it directly.
 
+Whichever route was taken and whichever way it went, the gateway files exactly
+one record through `AuditLog` in `apps/server/src/audit.ts` **before** it
+answers: a forward is an `allow`, any refusal that reached a decision is a
+`deny` carrying the reason the caller was given. Identity comes from the
+resolved `Principal`, or from the stored `RunSession` when the call was refused
+before one could be resolved — never from the claims of a credential the
+gateway has just declined to trust, which is why a forged token naming no known
+session is denied and logged but files no record. Records hold the tool, the
+`resource` identifier, and the reason; no request or response body is stored,
+and both text fields are masked and length-bounded on the way to the store. The
+operator reads a Run's trail at `GET /api/runs/:id/audit`.
+
 `/gateway/*` sits outside the `/api/*` shared-token hook on purpose: the agent
 is a different principal from the browser operator. Because the origin depends
 on the caller's vantage point, the **active runner** — not startup — writes
@@ -83,7 +95,7 @@ Interrupted Runs become `cancelled` after a restart.
 ### Storage
 
 ```text
-data/launchpad.json       Agent, message, and Run metadata
+data/launchpad.json       Agent, message, Run, session, and audit records
 workspaces/AgentID/       Agent-created files
 workspaces/.deleted/      Archived deleted workspaces
 codex-home/               Codex configuration and sessions

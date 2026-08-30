@@ -75,6 +75,7 @@ apps/
       gateway.ts                  Agent Access Gateway: agent-facing proxy routes
       run-jwt.ts                  HS256 sign/verify for per-run credentials
       authz.ts                    can(): the pure authorization decision
+      audit.ts                    AuditLog: one redacted record per decision
       mock-tools.ts               docs/search/payments the gateway forwards to
   web/           React 19 + Vite UI (@launchpad/web)
     src/
@@ -149,6 +150,7 @@ All under `/api`. Auth is a single optional shared bearer token
 | POST   | `/api/agents/:id/messages` | Send a task; creates an async Run    |
 | POST   | `/api/agents/:id/revoke`   | Revoke the Agent's live run sessions |
 | GET    | `/api/runs/:id`            | Poll Run status (the UI polls this)  |
+| GET    | `/api/runs/:id/audit`      | The Run's gateway decisions, by `ts` |
 
 Browser requests name the human they act as with an `x-launchpad-user` header
 (a seeded user id; `user-a` when absent, `400` when unknown). This is mock
@@ -168,7 +170,8 @@ their own run credential (`RUN_JWT`), not the browser's shared demo token.
 forwards to the mock tool service at `/internal/tools/*`, which accepts only
 calls carrying `GATEWAY_TOOL_CREDENTIAL` — so skipping the gateway is refused
 rather than merely undocumented. That surface is not a browser API and is not
-listed above.
+listed above. Both routes write one audit record per decision before answering;
+the operator reads them back at `GET /api/runs/:id/audit`.
 
 When adding an endpoint, update this table **and** the one in
 [AGENTS.md](AGENTS.md).
@@ -194,9 +197,13 @@ When adding an endpoint, update this table **and** the one in
    `can(principal, tool, resource?)`. Only on allow does it attach
    `GATEWAY_TOOL_CREDENTIAL` and forward; a denial is a `403` and the tool is
    never called.
-7. The runner returns a `RunnerResult`; the service persists the assistant
+7. Whichever way it went, the decision is written to `audit: AuditRecord[]`
+   through `AuditLog` **before** the answer is sent, so the store is never
+   behind what the agent has been told.
+8. The runner returns a `RunnerResult`; the service persists the assistant
    message and terminal Run state, and expires the run's session.
-8. The UI polls `/api/runs/:id` until the Run reaches a terminal status.
+9. The UI polls `/api/runs/:id` until the Run reaches a terminal status, and
+   reads `/api/runs/:id/audit` for what the gateway decided along the way.
 
 ## Configuration
 
@@ -276,6 +283,11 @@ These are load-bearing. Breaking one costs hackathon points directly:
     call, so a denial is a `403` with the tool untouched. The mock tool service
     is reachable only with `GATEWAY_TOOL_CREDENTIAL`, which is what makes
     skipping the gateway a refusal rather than a shortcut.
+11. **Every gateway decision leaves exactly one redacted record, written before
+    the answer.** `AuditLog` is the only writer, identity comes from stored
+    ownership rather than from a credential's claims, and no request or
+    response body is persisted. `audit.test.ts` and `gateway.test.ts` assert
+    the redaction and the one-record-per-decision rule and must keep doing so.
 
 ## Security And Data Handling
 
@@ -290,6 +302,10 @@ These are load-bearing. Breaking one costs hackathon points directly:
 - `GATEWAY_TOOL_CREDENTIAL` lives in the server process only, under the same
   rules. The gateway attaches it when forwarding an authorized tool call and
   nowhere else; it must never reach a runner environment or a response body.
+- Audit records carry a decision, not a payload: the tool, the `resource`
+  identifier, and the reason. Redaction happens inside `audit.ts` on the way to
+  the store, so no call site can persist a record that skipped it. When you add
+  a field to `AuditRecord`, run it through the same masking.
 - The Ark key lives in the server process only. It is attached by the gateway
   when forwarding upstream and must never be copied into a runner environment,
   argv, a generated `config.toml`, or a log line — including the forwarded
@@ -306,7 +322,7 @@ npm run test        # Vitest, server workspace
 ```
 
 Tests live beside sources as `*.test.ts`. Current suites cover `agent-service`,
-`app`, `authz`, `config`, `gateway`, `mock-tools`, `run-jwt`, `store`,
+`app`, `audit`, `authz`, `config`, `gateway`, `mock-tools`, `run-jwt`, `store`,
 `codex-runner`, `container-codex-runner`, and the runner spawn environments.
 
 **Platform note:** `config.ts` calls `path.resolve` on every path, so resolved
@@ -331,9 +347,43 @@ ECS deployment is optional and does not affect scoring. See
 
 ## Observability
 
-The Starter Kit ships Fastify request logging (pino) and nothing else. There is
-no trace model, span model, or correlation ID. If the team chose the trace and
-audit direction, this section must be rewritten to describe what was built.
+Fastify request logging (pino) is the Starter Kit's baseline and is still the
+only thing covering ordinary HTTP traffic — there is no trace model, span model,
+or correlation ID, and none is planned.
+
+What we added is narrower and durable: an **audit trail of gateway decisions**.
+Logs say what happened to a process; these records say what an Agent was allowed
+to do, on whose authority, and why.
+
+- **One record per decision.** `AuditLog.record()` in
+  `apps/server/src/audit.ts` is the single writer, and every route in
+  `gateway.ts` goes through it — model proxy and tool proxy, allow and deny.
+  A forward is an `allow`; every refusal that reaches a decision is a `deny`
+  carrying the same reason the caller was given (`can()`'s or the verifier's).
+  Never two rows for one request, never none.
+- **Written before the answer.** The record is persisted before the reply is
+  sent and before anything is forwarded, so the store is never behind what the
+  agent already knows. On the allow path a store that cannot accept the record
+  stops the call; on a deny path a failed write is logged and the denial stands
+  — evidence trouble must never rescue a caller.
+- **Identity is a store fact.** `humanId` / `agentId` / `runId` come from the
+  resolved `Principal`, or from the stored `RunSession` when a call was refused
+  before a principal could be resolved. Claims from a credential the gateway
+  has just refused to trust are never used as an identity, so a call it cannot
+  attribute to a run is denied and logged but files no record — there is no Run
+  to file it under. The same applies to a path naming nothing that is a
+  `ToolName`.
+- **Redacted by construction.** No request or response body is stored, only the
+  `resource` identifier (`docs/doc-b1`) and the reason. Both go through the
+  masking in `audit.ts`, which removes the Ark key, `GATEWAY_JWT_SECRET`,
+  `GATEWAY_TOOL_CREDENTIAL`, anything shaped like a bearer header or a signed
+  token, and bounds each field's length.
+- **Read per Run.** `GET /api/runs/:id/audit` returns that Run's records
+  ordered by `ts`, behind `APP_AUTH_TOKEN` like the rest of `/api`. Unknown Run
+  → `404`. It is the evidence panel's data source.
+
+Token metering is separate and unchanged: `RunUsage` is parsed from Codex
+output. Per-call usage is deliberately not parsed out of the SSE stream.
 
 ## Related Docs
 

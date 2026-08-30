@@ -38,6 +38,8 @@ Summary — canonical list is in [CLAUDE.md](CLAUDE.md#invariants-to-preserve).
    upstream is never called.
 10. Authorization is decided per call from stored ownership, not from the token:
     a denied tool call is `403` and the tool is never reached.
+11. Every gateway decision leaves exactly one redacted audit record, written
+    before the answer is sent. No request or response body is persisted.
 
 ## Repo Map
 
@@ -53,6 +55,7 @@ Summary — canonical list is in [CLAUDE.md](CLAUDE.md#invariants-to-preserve).
 | `apps/server/src/gateway.ts`                | Agent Access Gateway routes     |
 | `apps/server/src/run-jwt.ts`                | Per-run credential sign/verify  |
 | `apps/server/src/authz.ts`                  | `can()`, roles, ownership rule  |
+| `apps/server/src/audit.ts`                  | Redacted record per decision    |
 | `apps/server/src/mock-tools.ts`             | docs/search/payments downstream |
 | `apps/web/src/App.tsx`                      | Entire UI                       |
 | `docs/`                                     | Architecture, deployment, brief |
@@ -60,10 +63,11 @@ Summary — canonical list is in [CLAUDE.md](CLAUDE.md#invariants-to-preserve).
 Browser-facing routes live under `/api/*` behind the shared demo token,
 including the operator's kill switch:
 
-| Method | Path                     | Purpose                                      |
-| ------ | ------------------------ | -------------------------------------------- |
-| GET    | `/api/users`             | Seeded users for the dev user switcher       |
-| POST   | `/api/agents/:id/revoke` | Revoke the Agent's live run sessions mid-run |
+| Method | Path                     | Purpose                                       |
+| ------ | ------------------------ | --------------------------------------------- |
+| GET    | `/api/users`             | Seeded users for the dev user switcher        |
+| POST   | `/api/agents/:id/revoke` | Revoke the Agent's live run sessions mid-run  |
+| GET    | `/api/runs/:id/audit`    | That Run's gateway decisions, ordered by `ts` |
 
 Browser requests name the acting human with `x-launchpad-user` (a seeded user
 id; `user-a` when absent, `400` when unknown). It sets a created Agent's
@@ -84,6 +88,10 @@ tool is never called. Forwarding targets the mock tool service at
 `/internal/tools/*`, which accepts only calls carrying
 `GATEWAY_TOOL_CREDENTIAL` — the credential is what makes skipping the gateway a
 refusal rather than a shortcut.
+
+Both gateway routes file one redacted audit record per decision through
+`audit.ts` before they answer — allow or deny, model or tool — and the operator
+reads a Run's trail back at `GET /api/runs/:id/audit`.
 
 ## Extension Seams
 
@@ -111,7 +119,11 @@ npm run poc       # local POC with container Runtime
 - **Enforcement location:** is the check server-side? A UI-only guard is not
   middleware and is trivially bypassed.
 - **Secrets:** no keys or tokens in source, logs, traces, fixtures, or test
-  output. Are captured payloads redacted before storage?
+  output. Are captured payloads redacted before storage? A new field on
+  `AuditRecord` must go through the masking in `audit.ts`.
+- **Evidence:** does each gateway decision still write exactly one record,
+  before the response is sent, with identity taken from stored ownership rather
+  than from the credential's claims?
 - **Async contract:** message POST still returns without blocking; Run status
   still reaches a terminal state.
 - **Error handling:** what happens when the middleware itself fails? Does it
