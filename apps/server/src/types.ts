@@ -7,7 +7,9 @@ export type MessageRole = "user" | "assistant";
 export type Role = "admin" | "basic";
 
 /** Everything the gateway can be asked to reach on an Agent's behalf. */
-export type ToolName = "model" | "docs" | "search" | "payments";
+export const TOOL_NAMES = ["model", "docs", "search", "payments"] as const;
+
+export type ToolName = (typeof TOOL_NAMES)[number];
 
 export interface User {
   id: string;
@@ -116,6 +118,29 @@ export interface MockDoc {
   content: string;
 }
 
+/**
+ * One gateway decision, as evidence. It is written before the answer it
+ * describes is sent, so a denial the agent saw is a denial the store can prove.
+ *
+ * What it deliberately does not hold is content: no prompt, no model reply, no
+ * tool payload. The record names who asked, what they asked for, and why the
+ * answer was yes or no — enough to audit a decision without becoming a second
+ * copy of the conversation.
+ */
+export interface AuditRecord {
+  id: string;
+  ts: string;
+  /** The acting human, resolved server-side — never read from a credential. */
+  humanId: string;
+  agentId: string;
+  runId: string;
+  tool: ToolName;
+  /** What the call was about, e.g. `docs/doc-b1`; null when it names nothing. */
+  resource: string | null;
+  decision: "allow" | "deny";
+  reason: string;
+}
+
 export interface Database {
   version: 2;
   agents: Agent[];
@@ -124,6 +149,7 @@ export interface Database {
   sessions: RunSession[];
   users: User[];
   docs: MockDoc[];
+  audit: AuditRecord[];
 }
 
 export interface CreateAgentInput {
@@ -163,14 +189,23 @@ export interface RunSessionDirectory {
 }
 
 /**
- * Everything the gateway reads to authorize an agent call. Permissions are
- * resolved through here on every call rather than carried in the credential,
- * so revoking a role takes effect at once instead of at token expiry.
+ * Where the gateway files the evidence for a decision. Append-only from the
+ * gateway's side: it records what it decided and never reads the trail back.
+ */
+export interface AuditSink {
+  appendAuditRecord(record: AuditRecord): Promise<void>;
+}
+
+/**
+ * Everything the gateway reads to authorize an agent call, plus the sink it
+ * writes the outcome to. Permissions are resolved through here on every call
+ * rather than carried in the credential, so revoking a role takes effect at
+ * once instead of at token expiry.
  *
  * Every lookup answers with `undefined` rather than throwing: the gateway turns
  * a missing record into a denial, and an exception would turn it into a 500.
  */
-export interface GatewayDirectory extends RunSessionDirectory {
+export interface GatewayDirectory extends RunSessionDirectory, AuditSink {
   findAgent(id: string): Agent | undefined;
   findUser(id: string): User | undefined;
   findMockDoc(id: string): MockDoc | undefined;

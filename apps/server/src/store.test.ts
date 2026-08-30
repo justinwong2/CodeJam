@@ -101,7 +101,38 @@ describe("JsonStore migration", () => {
       sessions: [],
       users: SEED_USERS,
       docs: SEED_DOCS,
+      audit: [],
     });
+  });
+
+  it("carries stored audit records forward without a version bump", async () => {
+    const filePath = await temporaryFile();
+    const record = {
+      id: "audit-1",
+      ts: "2026-08-02T00:00:00.000Z",
+      humanId: "user-a",
+      agentId: "agent-1",
+      runId: "run-1",
+      tool: "docs" as const,
+      resource: "docs/doc-a1",
+      decision: "allow" as const,
+      reason: 'Role "admin" grants the docs tool',
+    };
+    await writeFile(
+      filePath,
+      JSON.stringify({ version: 1, agents: [legacyAgent] }),
+      "utf8",
+    );
+
+    const store = new JsonStore(filePath);
+    await store.initialize();
+    expect(store.snapshot().audit).toEqual([]);
+    await store.mutate((database) => database.audit.push(record));
+
+    // Evidence outlives the process that wrote it, or it is not evidence.
+    const reopened = new JsonStore(filePath);
+    await reopened.initialize();
+    expect(reopened.snapshot().audit).toEqual([record]);
   });
 
   it("refuses a database written by a newer server rather than truncating it", async () => {

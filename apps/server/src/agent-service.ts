@@ -9,6 +9,7 @@ import type {
   Agent,
   AgentRun,
   AgentRunner,
+  AuditRecord,
   CreateAgentInput,
   Database,
   GatewayDirectory,
@@ -345,6 +346,16 @@ export class AgentService implements GatewayDirectory {
     return this.store.select((database) =>
       database.docs.find((doc) => doc.id === id),
     );
+  }
+
+  /**
+   * Files one gateway decision. The gateway awaits this before it answers, so
+   * an agent never learns the outcome of a call the store has not recorded.
+   */
+  async appendAuditRecord(record: AuditRecord): Promise<void> {
+    await this.store.mutate((database) => {
+      database.audit.push(record);
+    });
   }
 
   /** The live session behind a run credential, looked up by its `jti`. */

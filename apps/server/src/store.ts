@@ -4,6 +4,7 @@ import { DEFAULT_OWNER_ID } from "./types.js";
 import type {
   Agent,
   AgentRun,
+  AuditRecord,
   Database,
   Message,
   MockDoc,
@@ -55,6 +56,7 @@ const emptyDatabase = (): Database => ({
   sessions: [],
   users: structuredClone(SEED_USERS),
   docs: structuredClone(SEED_DOCS),
+  audit: [],
 });
 
 const collection = <T>(value: unknown): T[] =>
@@ -109,6 +111,7 @@ export function migrateDatabase(parsed: unknown): Database {
     sessions: collection<RunSession>(source.sessions),
     users: seeded(collection<User>(source.users), SEED_USERS),
     docs: seeded(collection<MockDoc>(source.docs), SEED_DOCS),
+    audit: collection<AuditRecord>(source.audit),
   };
 }
 
