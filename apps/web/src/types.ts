@@ -6,7 +6,10 @@ export type RunStatus =
 // nothing here is a decision, only a shape the UI needs to render one.
 
 /** Seeded, prebuilt roles. Mirrors the server's `Role`. */
-export type Role = "admin" | "basic";
+export type Role = "admin" | "basic" | "suspended";
+
+/** The roles the console may assign. Mirrors the server's `ROLE_NAMES`. */
+export const ROLE_NAMES: Role[] = ["admin", "basic", "suspended"];
 
 /** Everything the gateway can be asked to reach. Mirrors `ToolName`. */
 export type ToolName = "model" | "docs" | "search" | "payments";
@@ -39,6 +42,30 @@ export interface AuditRecord {
   resource: string | null;
   decision: "allow" | "deny";
   reason: string;
+}
+
+/**
+ * A run session as the console is allowed to see it: claims only. Mirrors the
+ * server's `RunSessionClaims` — the raw credential is in no payload, so there
+ * is nothing here for the browser to render even by accident.
+ */
+export interface RunSessionClaims {
+  jti: string;
+  agentId: string;
+  ownerId: string;
+  runId: string;
+  issuedAt: string;
+  expiresAt: string;
+  revoked: boolean;
+}
+
+/**
+ * A document as ground truth — it exists, this human owns it. Mirrors the
+ * server's `MockDocMetadata`; content is deliberately not part of the shape.
+ */
+export interface MockDocMetadata {
+  id: string;
+  ownerId: string;
 }
 
 export interface Agent {

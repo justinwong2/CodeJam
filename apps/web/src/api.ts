@@ -3,6 +3,9 @@ import type {
   AgentRun,
   AuditRecord,
   Message,
+  MockDocMetadata,
+  Role,
+  RunSessionClaims,
   SystemInfo,
   User,
 } from "./types";
@@ -132,4 +135,22 @@ export const api = {
   run: (id: string) => request<{ run: AgentRun }>("/api/runs/" + id),
   runAudit: (id: string) =>
     request<{ audit: AuditRecord[] }>("/api/runs/" + id + "/audit"),
+
+  // The Operator Console's reads and its two levers. Both levers are ordinary
+  // control-plane calls: the server decides what they mean, and the console is
+  // only the thing that asks.
+  operatorAudit: () => request<{ audit: AuditRecord[] }>("/api/operator/audit"),
+  operatorSessions: () =>
+    request<{ sessions: RunSessionClaims[] }>("/api/operator/sessions"),
+  operatorDocs: () =>
+    request<{ docs: MockDocMetadata[] }>("/api/operator/docs"),
+  setUserRole: (id: string, role: Role) =>
+    request<{ user: User }>("/api/users/" + id, {
+      method: "PATCH",
+      body: JSON.stringify({ role }),
+    }),
+  revokeAgentSessions: (id: string) =>
+    request<{ revokedSessions: number }>("/api/agents/" + id + "/revoke", {
+      method: "POST",
+    }),
 };

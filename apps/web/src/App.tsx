@@ -11,9 +11,13 @@ import type {
   AgentRun,
   AuditRecord,
   Message,
+  MockDocMetadata,
+  Role,
+  RunSessionClaims,
   SystemInfo,
   User,
 } from "./types";
+import { ROLE_NAMES } from "./types";
 
 const starterPrompts = [
   "Create a small TypeScript CLI that prints a weather summary from sample JSON.",
@@ -33,6 +37,26 @@ function formatTime(value: string): string {
     hour: "2-digit",
     minute: "2-digit",
   }).format(new Date(value));
+}
+
+/** Seconds matter in the console: decisions arrive several to a minute. */
+function formatStamp(value: string): string {
+  return new Intl.DateTimeFormat(undefined, {
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+  }).format(new Date(value));
+}
+
+/**
+ * What a session is right now. Live sessions are the ones revocation acts on;
+ * the rest are shown as they are so an operator can see what a Revoke did.
+ */
+function sessionState(
+  session: RunSessionClaims,
+): "revoked" | "expired" | "live" {
+  if (session.revoked) return "revoked";
+  return Date.parse(session.expiresAt) <= Date.now() ? "expired" : "live";
 }
 
 function formatUsage(run: AgentRun | null): string {
@@ -62,6 +86,226 @@ function Spinner() {
   return <span className="spinner" aria-label="Loading" />;
 }
 
+/**
+ * The Operator Console: the decision feed, the ground truth behind it, and the
+ * two levers the platform already has — revoke a run's credentials, change what
+ * a human may do. It renders and it triggers. Every decision it shows was made
+ * server-side before the Agent was told anything, and nothing here can grant
+ * what the server would refuse: the levers are ordinary control-plane calls,
+ * and the answers come back from the store.
+ */
+function OperatorConsole({
+  audit,
+  sessions,
+  docs,
+  users,
+  ownerName,
+  onAssignRole,
+  onRevoke,
+}: {
+  audit: AuditRecord[];
+  sessions: RunSessionClaims[];
+  docs: MockDocMetadata[];
+  users: User[];
+  ownerName: (ownerId: string) => string;
+  onAssignRole: (id: string, role: Role) => void;
+  onRevoke: (agentId: string) => void;
+}) {
+  // Newest first: an operator watching a demo cares about the decision that
+  // just happened, not the one this Run opened with.
+  const feed = [...audit].reverse();
+  const denials = audit.filter((record) => record.decision === "deny").length;
+
+  return (
+    <section className="console">
+      <header className="console-header">
+        <div>
+          <span className="eyebrow">Operator Console</span>
+          <h1>Every decision, and the two levers behind them</h1>
+          <p>
+            Displays and triggers only. The gateway decided each row below
+            server-side, before the Agent had an answer — this page enforces
+            nothing and can show nothing the store does not hold.
+          </p>
+        </div>
+        <div className="console-counts">
+          <span>
+            <strong>{audit.length}</strong> decisions
+          </span>
+          <span className={denials > 0 ? "console-count-deny" : ""}>
+            <strong>{denials}</strong> denied
+          </span>
+          <span>
+            <strong>
+              {sessions.filter((item) => sessionState(item) === "live").length}
+            </strong>{" "}
+            live sessions
+          </span>
+        </div>
+      </header>
+
+      <div className="console-panel">
+        <div className="console-panel-head">
+          <h2>People</h2>
+          <span>
+            A role change takes effect on that human&apos;s Agents&apos; next
+            gateway call — no token is reissued, because permissions were never
+            in one.
+          </span>
+        </div>
+        <table className="console-table">
+          <thead>
+            <tr>
+              <th>Human</th>
+              <th>Id</th>
+              <th>Role</th>
+            </tr>
+          </thead>
+          <tbody>
+            {users.map((user) => (
+              <tr key={user.id}>
+                <td>{user.name}</td>
+                <td className="mono">{user.id}</td>
+                <td>
+                  <select
+                    aria-label={"Role for " + user.name}
+                    value={user.role}
+                    onChange={(event) =>
+                      onAssignRole(user.id, event.target.value as Role)
+                    }
+                  >
+                    {ROLE_NAMES.map((role) => (
+                      <option key={role} value={role}>
+                        {role}
+                      </option>
+                    ))}
+                  </select>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+
+      <div className="console-panel">
+        <div className="console-panel-head">
+          <h2>Run sessions</h2>
+          <span>
+            Claims only — the credential itself is in no payload and renders
+            nowhere. Revoking stops that Agent&apos;s next gateway call.
+          </span>
+        </div>
+        <table className="console-table">
+          <thead>
+            <tr>
+              <th>jti</th>
+              <th>Owner</th>
+              <th>Run</th>
+              <th>Issued</th>
+              <th>Expires</th>
+              <th>State</th>
+              <th />
+            </tr>
+          </thead>
+          <tbody>
+            {sessions.map((session) => {
+              const state = sessionState(session);
+              return (
+                <tr key={session.jti}>
+                  <td className="mono">{session.jti.slice(0, 8)}…</td>
+                  <td>{ownerName(session.ownerId)}</td>
+                  <td className="mono">{session.runId.slice(0, 8)}…</td>
+                  <td>{formatStamp(session.issuedAt)}</td>
+                  <td>{formatStamp(session.expiresAt)}</td>
+                  <td>
+                    <span className={"session-state session-" + state}>
+                      {state}
+                    </span>
+                  </td>
+                  <td>
+                    <button
+                      className="button button-danger console-button"
+                      disabled={state !== "live"}
+                      onClick={() => onRevoke(session.agentId)}
+                    >
+                      Revoke
+                    </button>
+                  </td>
+                </tr>
+              );
+            })}
+            {sessions.length === 0 && (
+              <tr>
+                <td colSpan={7} className="console-empty">
+                  No run has been started yet.
+                </td>
+              </tr>
+            )}
+          </tbody>
+        </table>
+      </div>
+
+      <div className="console-panel">
+        <div className="console-panel-head">
+          <h2>Documents</h2>
+          <span>
+            Ground truth: which documents exist and who owns them. Metadata only
+            — content belongs to the owner, not to whoever opens this page.
+          </span>
+        </div>
+        <table className="console-table">
+          <thead>
+            <tr>
+              <th>Document</th>
+              <th>Owner</th>
+            </tr>
+          </thead>
+          <tbody>
+            {docs.map((doc) => (
+              <tr key={doc.id}>
+                <td className="mono">{doc.id}</td>
+                <td>{ownerName(doc.ownerId)}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+
+      <div className="console-panel">
+        <div className="console-panel-head">
+          <h2>Decision feed</h2>
+          <span>
+            Every Agent, every Run, newest first. Denials are the same rows the
+            Agent was answered with.
+          </span>
+        </div>
+        {feed.length === 0 ? (
+          <p className="evidence-empty">
+            No gateway decisions recorded yet. Send a task, or have an Agent
+            reach for a tool it may not use.
+          </p>
+        ) : (
+          <ul className="audit-list console-audit">
+            {feed.map((record) => (
+              <li
+                className={"audit-row audit-" + record.decision}
+                key={record.id}
+              >
+                <span className="audit-decision">{record.decision}</span>
+                <span className="audit-tool">{record.tool}</span>
+                <span className="audit-human">{ownerName(record.humanId)}</span>
+                <span className="audit-resource">{record.resource ?? "—"}</span>
+                <span className="audit-reason">{record.reason}</span>
+                <span className="audit-ts">{formatStamp(record.ts)}</span>
+              </li>
+            ))}
+          </ul>
+        )}
+      </div>
+    </section>
+  );
+}
+
 export default function App() {
   const [agents, setAgents] = useState<Agent[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
@@ -79,6 +323,12 @@ export default function App() {
     records: AuditRecord[];
   } | null>(null);
   const [busy, setBusy] = useState(false);
+  const [showConsole, setShowConsole] = useState(false);
+  const [console_, setConsole] = useState<{
+    audit: AuditRecord[];
+    sessions: RunSessionClaims[];
+    docs: MockDocMetadata[];
+  }>({ audit: [], sessions: [], docs: [] });
   const [error, setError] = useState<string | null>(null);
   const [authRequired, setAuthRequired] = useState<boolean | null>(null);
   const [authInput, setAuthInput] = useState("");
@@ -128,6 +378,52 @@ export default function App() {
     setError(null);
     try {
       await refreshAgents();
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : String(reason));
+    }
+  };
+
+  /**
+   * Everything the console shows, read back from the server. It is refreshed
+   * after every lever the console pulls, because the store is the truth about
+   * what happened and the browser's copy is only a picture of it.
+   */
+  const refreshConsole = useCallback(async () => {
+    const [audit, sessions, docs, people] = await Promise.all([
+      api.operatorAudit(),
+      api.operatorSessions(),
+      api.operatorDocs(),
+      api.users(),
+    ]);
+    setConsole({
+      audit: audit.audit,
+      sessions: sessions.sessions,
+      docs: docs.docs,
+    });
+    setUsers(people.users);
+  }, []);
+
+  /**
+   * Assigns a role. The browser decides nothing by doing this: it asks the
+   * server to write a different role, and every later decision is made against
+   * what the store then holds — including for runs already in flight.
+   */
+  const assignRole = async (id: string, role: Role) => {
+    setError(null);
+    try {
+      await api.setUserRole(id, role);
+      await Promise.all([refreshConsole(), refreshAgents()]);
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : String(reason));
+    }
+  };
+
+  /** Revokes an Agent's live run credentials. The server does the revoking. */
+  const revokeSessions = async (agentId: string) => {
+    setError(null);
+    try {
+      await api.revokeAgentSessions(agentId);
+      await refreshConsole();
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : String(reason));
     }
@@ -226,6 +522,27 @@ export default function App() {
       current = false;
     };
   }, [activeRun]);
+
+  /**
+   * The console re-reads while it is open, so a decision made by an Agent that
+   * is running right now appears in the feed without anyone reloading. Failures
+   * are swallowed: a console that blanks itself on one bad read is worse than
+   * one showing the last thing it knew.
+   */
+  useEffect(() => {
+    if (!showConsole) return;
+    let current = true;
+    const read = () => {
+      if (!current) return;
+      void refreshConsole().catch(() => undefined);
+    };
+    read();
+    const timer = window.setInterval(read, 3_000);
+    return () => {
+      current = false;
+      window.clearInterval(timer);
+    };
+  }, [showConsole, refreshConsole]);
 
   const createAgent = async (event: React.FormEvent) => {
     event.preventDefault();
@@ -452,6 +769,18 @@ export default function App() {
             Dev switcher. The server resolves this user&apos;s role and decides
             what their Agents may do.
           </span>
+          {/* Roles as the store holds them right now, so a promotion left over
+              from an earlier demo step is visible rather than latent. */}
+          <ul className="role-roster">
+            {users.map((user) => (
+              <li key={user.id}>
+                <span>{user.name}</span>
+                <span className={"role-chip role-" + user.role}>
+                  {user.role}
+                </span>
+              </li>
+            ))}
+          </ul>
         </div>
 
         <button
@@ -462,6 +791,14 @@ export default function App() {
           }}
         >
           <span>＋</span> Create Agent
+        </button>
+
+        <button
+          className={"button button-ghost console-toggle"}
+          onClick={() => setShowConsole((value) => !value)}
+          aria-pressed={showConsole}
+        >
+          {showConsole ? "Back to the Playground" : "Operator Console"}
         </button>
 
         <div className="sidebar-label">
@@ -539,7 +876,17 @@ export default function App() {
           </div>
         )}
 
-        {selected ? (
+        {showConsole ? (
+          <OperatorConsole
+            audit={console_.audit}
+            sessions={console_.sessions}
+            docs={console_.docs}
+            users={users}
+            ownerName={ownerName}
+            onAssignRole={(id, role) => void assignRole(id, role)}
+            onRevoke={(agentId) => void revokeSessions(agentId)}
+          />
+        ) : selected ? (
           <>
             <header className="agent-header">
               <div>
