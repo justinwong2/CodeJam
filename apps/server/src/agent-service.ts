@@ -23,13 +23,6 @@ import { WorkspaceManager } from "./workspace.js";
 
 const now = () => new Date().toISOString();
 
-/**
- * A session outlives the turn it authorizes by this much. A model call already
- * in flight when `CODEX_TIMEOUT_MS` elapses must not be denied mid-stream while
- * the runner is still tearing the turn down.
- */
-const SESSION_EXPIRY_MARGIN_MS = 60_000;
-
 /** Ends a run's sessions where they stand, without pretending they were revoked. */
 function expireRunSessions(
   database: Database,
@@ -255,9 +248,10 @@ export class AgentService implements GatewayDirectory {
     };
     // The run's identity, minted before the run is admitted so the session and
     // the run become visible in the same write: a token can never name a run
-    // the store has not accepted.
-    const expiresAtMs =
-      Date.now() + this.config.codexTimeoutMs + SESSION_EXPIRY_MARGIN_MS;
+    // the store has not accepted. It lives for `SESSION_TTL_MS` — long enough
+    // that a call still in flight when the turn is torn down is not denied
+    // mid-stream, and no longer than the operator asked for.
+    const expiresAtMs = Date.now() + this.config.sessionTtlMs;
     const session: RunSession = {
       runId,
       agentId,

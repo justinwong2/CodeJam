@@ -48,6 +48,36 @@ describe("Gateway signing secret configuration", () => {
   });
 });
 
+describe("Run session lifetime configuration", () => {
+  const base = { NODE_ENV: "test", GATEWAY_JWT_SECRET: SECRET };
+
+  it("defaults to the lifetime the run session already had", () => {
+    // 600_000 turn timeout plus the 60_000 margin that used to be hardcoded:
+    // naming the value must not change it.
+    expect(loadConfig({ ...base }).sessionTtlMs).toBe(660_000);
+  });
+
+  it("takes the configured lifetime, coerced from the environment string", () => {
+    expect(loadConfig({ ...base, SESSION_TTL_MS: "90000" }).sessionTtlMs).toBe(
+      90_000,
+    );
+  });
+
+  it("refuses a lifetime too short to be a credential lifetime", () => {
+    expect(() => loadConfig({ ...base, SESSION_TTL_MS: "10" })).toThrow(
+      /SESSION_TTL_MS/,
+    );
+  });
+
+  it("refuses a lifetime that is not a number at all", () => {
+    // Fail loudly at boot: a silently-defaulted credential lifetime is a
+    // security property nobody would notice had been ignored.
+    expect(() =>
+      loadConfig({ ...base, SESSION_TTL_MS: "ten minutes" }),
+    ).toThrow(/SESSION_TTL_MS/);
+  });
+});
+
 describe("Tool service credential configuration", () => {
   const base = { NODE_ENV: "test", GATEWAY_JWT_SECRET: SECRET };
 

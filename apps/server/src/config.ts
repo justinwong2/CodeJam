@@ -15,6 +15,13 @@ const envSchema = z.object({
     .enum(["read-only", "workspace-write", "danger-full-access"])
     .default("workspace-write"),
   CODEX_TIMEOUT_MS: z.coerce.number().int().min(1_000).default(600_000),
+  // How long a run's gateway credential stays usable. Its own variable rather
+  // than a margin bolted onto the turn timeout: the lifetime of a credential is
+  // a security decision, and it should be possible to shorten it without
+  // shortening what a turn is allowed to take. The default is the value the
+  // hardcoded coupling produced (600_000 + 60_000), so naming it changed
+  // nothing about how long a session lives.
+  SESSION_TTL_MS: z.coerce.number().int().min(1_000).default(660_000),
   CODEX_MAX_OUTPUT_BYTES: z.coerce
     .number()
     .int()
@@ -133,6 +140,7 @@ export function loadConfig(environment: NodeJS.ProcessEnv = process.env) {
     codexBin: env.CODEX_BIN,
     codexSandboxMode: env.CODEX_SANDBOX_MODE,
     codexTimeoutMs: env.CODEX_TIMEOUT_MS,
+    sessionTtlMs: env.SESSION_TTL_MS,
     codexMaxOutputBytes: env.CODEX_MAX_OUTPUT_BYTES,
     runtimeProvider: env.RUNTIME_PROVIDER,
     containerEngine: env.CONTAINER_ENGINE,

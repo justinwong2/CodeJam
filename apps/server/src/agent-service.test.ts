@@ -39,7 +39,11 @@ afterEach(async () => {
   );
 });
 
-function serviceIn(root: string, runner: AgentRunner): AgentService {
+function serviceIn(
+  root: string,
+  runner: AgentRunner,
+  environment: Record<string, string> = {},
+): AgentService {
   const config = loadConfig({
     NODE_ENV: "test",
     GATEWAY_JWT_SECRET: GATEWAY_SECRET,
@@ -48,6 +52,7 @@ function serviceIn(root: string, runner: AgentRunner): AgentService {
     CODEX_HOME: path.join(root, "codex"),
     ARK_API_KEY: "test-key",
     ARK_MODEL: "ep-test",
+    ...environment,
   });
   return new AgentService(
     config,
@@ -66,8 +71,13 @@ async function temporaryRoot(): Promise<string> {
 async function makeService(
   runner: AgentRunner = new FakeRunner(),
   root?: string,
+  environment: Record<string, string> = {},
 ): Promise<AgentService> {
-  const service = serviceIn(root ?? (await temporaryRoot()), runner);
+  const service = serviceIn(
+    root ?? (await temporaryRoot()),
+    runner,
+    environment,
+  );
   await service.initialize();
   return service;
 }
@@ -164,6 +174,46 @@ describe("Run sessions", () => {
 
     finish({ output: "done", threadId: "thread", usage: null });
     await expect.poll(() => service.getRun(run.id).status).toBe("completed");
+  });
+
+  it("mints a session that lives exactly as long as SESSION_TTL_MS says", async () => {
+    const { runner, requests, finish } = pendingRunner();
+    const service = await makeService(runner, undefined, {
+      SESSION_TTL_MS: "5000",
+    });
+    const agent = await service.createAgent({ name: "Short-lived" });
+    const before = Date.now();
+    const { run } = await service.sendMessage(agent.id, "do the thing");
+    await expect.poll(() => requests.length).toBe(1);
+
+    const session = service.listRunSessions(agent.id)[0];
+    const lifetime = Date.parse(session?.expiresAt ?? "") - before;
+    // Bounded on both sides: a lifetime that merely happens to be in the
+    // future would pass a one-sided assertion whatever the setting said.
+    expect(lifetime).toBeGreaterThan(4_000);
+    expect(lifetime).toBeLessThanOrEqual(5_000 + 2_000);
+
+    finish({ output: "done", threadId: "thread", usage: null });
+    await settle(service, run.id);
+  });
+
+  it("defaults a session's lifetime to the value the coupling used to give it", async () => {
+    const { runner, requests, finish } = pendingRunner();
+    const service = await makeService(runner);
+    const agent = await service.createAgent({ name: "Default" });
+    const before = Date.now();
+    const { run } = await service.sendMessage(agent.id, "do the thing");
+    await expect.poll(() => requests.length).toBe(1);
+
+    // 600_000 + 60_000, as it was before the lifetime had a name of its own.
+    const lifetime =
+      Date.parse(service.listRunSessions(agent.id)[0]?.expiresAt ?? "") -
+      before;
+    expect(lifetime).toBeGreaterThan(660_000 - 5_000);
+    expect(lifetime).toBeLessThanOrEqual(660_000 + 5_000);
+
+    finish({ output: "done", threadId: "thread", usage: null });
+    await settle(service, run.id);
   });
 
   it("never issues the same session twice", async () => {
