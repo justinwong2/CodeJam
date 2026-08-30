@@ -11,10 +11,13 @@ import { loadConfig } from "./config.js";
 import { signRunJwt, type RunJwtClaims } from "./run-jwt.js";
 import { JsonStore } from "./store.js";
 import type {
+  Agent,
   AuditRecord,
+  Role,
   RunnerRequest,
   RunnerResult,
   RunSession,
+  User,
 } from "./types.js";
 import { WorkspaceManager } from "./workspace.js";
 
@@ -37,14 +40,33 @@ function liveSession(overrides: Partial<RunSession> = {}): RunSession {
 /** Everything the gateway filed through the stub service, oldest first. */
 const stubAudit: AuditRecord[] = [];
 
+/**
+ * What role the stub resolves for an owner. Every gateway route now reads the
+ * owner's role per call — the model proxy included — so the stub has to hold
+ * one, and a test can change it to make the same credential mean less.
+ */
+const stubRoles = new Map<string, Role>();
+
 /** The control-plane half of the credential: only these sessions are live. */
 function serviceWith(...sessions: RunSession[]): AgentService {
   stubAudit.length = 0;
+  stubRoles.clear();
   return {
     listAgents: () => [],
     systemInfo: async () => ({}),
     findRunSession: (jwtId: string) =>
       sessions.find((session) => session.jwtId === jwtId),
+    // The Agent and its owner, as the store would hold them: a principal is
+    // assembled from these on every call, never from the credential's claims.
+    findAgent: (id: string): Agent | undefined => {
+      const session = sessions.find((item) => item.agentId === id);
+      return session ? ({ id, ownerId: session.ownerId } as Agent) : undefined;
+    },
+    findUser: (id: string): User | undefined => ({
+      id,
+      name: id,
+      role: stubRoles.get(id) ?? "admin",
+    }),
     appendAuditRecord: async (record: AuditRecord) => {
       stubAudit.push(record);
     },
@@ -701,12 +723,16 @@ describe("Tool gateway", () => {
     service: AgentService;
     /** Every request that reached the tool service, in order. */
     toolCalls: string[];
+    /** The stand-in Ark endpoint, so a denied model call can be proven unmade. */
+    upstream: Upstream;
     /** Starts a run owned by `userId` and returns its live run credential. */
     runAs: (userId: string) => Promise<string>;
     /** The run ids `runAs` started, in the order it started them. */
     runIds: string[];
     /** What the gateway persisted for a run, read back out of the store. */
     audit: (runId: string) => AuditRecord[];
+    /** Rewrites a seeded human's role in the store, as an operator would. */
+    setRole: (userId: string, role: Role) => Promise<void>;
   }
 
   async function toolFixture(): Promise<ToolFixture> {
@@ -764,11 +790,19 @@ describe("Tool gateway", () => {
     const audit = (runId: string): AuditRecord[] =>
       store.snapshot().audit.filter((record) => record.runId === runId);
 
+    const setRole = async (userId: string, role: Role): Promise<void> => {
+      await store.mutate((database) => {
+        for (const user of database.users) {
+          if (user.id === userId) user.role = role;
+        }
+      });
+    };
+
     openFixtures.push({
       app,
       finish: () => release({ output: "done", threadId: null, usage: null }),
     });
-    return { app, service, toolCalls, runAs, runIds, audit };
+    return { app, service, toolCalls, upstream, runAs, runIds, audit, setRole };
   }
 
   const callTool = (app: FastifyInstance, runJwt: string, url: string) =>
@@ -1003,6 +1037,99 @@ describe("Tool gateway", () => {
     expect(response.statusCode).toBe(403);
     expect(fixture.toolCalls).toEqual([]);
     expect(fixture.audit(fixture.runIds[0] ?? "")).toEqual([]);
+  });
+
+  /** The model call an agent makes, through the same credential a tool uses. */
+  const callModel = (app: FastifyInstance, runJwt: string) =>
+    app.inject({
+      method: "POST",
+      url: "/gateway/v1/responses",
+      headers: {
+        authorization: `Bearer ${runJwt}`,
+        "content-type": "application/json",
+      },
+      payload: '{"model":"ep-test"}',
+    });
+
+  it("runs the model call through the owner's role like any other tool", async () => {
+    const fixture = await toolFixture();
+    const runJwt = await fixture.runAs("user-b");
+
+    // A role that grants `model` still forwards, and the record says so.
+    const allowed = await callModel(fixture.app, runJwt);
+    expect(allowed.statusCode).toBe(200);
+    expect(fixture.upstream.calls).toHaveLength(1);
+    expect(fixture.audit(fixture.runIds[0] ?? "")).toMatchObject([
+      { humanId: "user-b", tool: "model", resource: null, decision: "allow" },
+    ]);
+  });
+
+  it("denies a suspended owner's model call without spending the Ark key", async () => {
+    const fixture = await toolFixture();
+    const runJwt = await fixture.runAs("user-b");
+    // Suspension is a store write. The credential is untouched: still signed,
+    // still unexpired, still unrevoked — and now worth nothing.
+    await fixture.setRole("user-b", "suspended");
+
+    const response = await callModel(fixture.app, runJwt);
+
+    // 403, not 401: the caller is who it says it is and may do nothing.
+    expect(response.statusCode).toBe(403);
+    expect((response.json() as { error: string }).error).toContain(
+      "may not use the model tool",
+    );
+    expect(fixture.upstream.calls).toEqual([]);
+
+    const records = fixture.audit(fixture.runIds[0] ?? "");
+    expect(records).toHaveLength(1);
+    expect(records[0]).toMatchObject({
+      humanId: "user-b",
+      tool: "model",
+      resource: null,
+      decision: "deny",
+    });
+    expect(records[0]?.reason).toBe(
+      (response.json() as { error: string }).error,
+    );
+  });
+
+  it("denies a suspended owner every tool as well as the model", async () => {
+    const fixture = await toolFixture();
+    const runJwt = await fixture.runAs("user-b");
+    await fixture.setRole("user-b", "suspended");
+
+    // The tools a basic role could use a moment ago, including its own document.
+    for (const url of ["docs/doc-b1", "search?q=gateway"]) {
+      const response = await callTool(fixture.app, runJwt, url);
+      expect(response.statusCode).toBe(403);
+      expect((response.json() as { error: string }).error).toContain(
+        "suspended",
+      );
+    }
+    expect(fixture.toolCalls).toEqual([]);
+    expect(fixture.audit(fixture.runIds[0] ?? "")).toMatchObject([
+      { tool: "docs", decision: "deny" },
+      { tool: "search", decision: "deny" },
+    ]);
+  });
+
+  it("denies a model call whose Agent's owner is no longer a known user", async () => {
+    const fixture = await toolFixture();
+    const runJwt = await fixture.runAs("user-a");
+    const store = (fixture.service as unknown as { store: JsonStore }).store;
+    await store.mutate((database) => {
+      for (const agent of database.agents) agent.ownerId = "user-ghost";
+    });
+
+    const response = await callModel(fixture.app, runJwt);
+
+    // No role to resolve is no authority to act with, so the model is refused
+    // the same way a tool is rather than falling back to a default.
+    expect(response.statusCode).toBe(403);
+    expect(fixture.upstream.calls).toEqual([]);
+    expect(fixture.audit(fixture.runIds[0] ?? "")).toMatchObject([
+      { tool: "model", decision: "deny" },
+    ]);
   });
 
   it("denies an Agent whose owner is no longer a known user", async () => {

@@ -219,17 +219,51 @@ async function proxyResponses(
     return reply.code(401).send({ error: authentication.reason });
   }
 
+  // Until a principal is resolved, the run's own session is who the call is.
+  const identity = sessionIdentity(authentication.session);
+
+  // The model is a tool like any other: the role that may not use it is the
+  // role that may not spend its tokens. Resolved from the Agent's current
+  // owner, exactly as the tool proxy does, so suspending a human stops their
+  // agents' model calls on the next one rather than at token expiry.
+  const resolution = resolvePrincipal(directory, authentication.session);
+  if (!resolution.resolved) {
+    return deny(
+      audit,
+      request,
+      reply,
+      identity,
+      "model",
+      null,
+      resolution.reason,
+    );
+  }
+  const principal = resolution.principal;
+
+  const decision = can(principal, "model");
+  if (!decision.allow) {
+    return deny(
+      audit,
+      request,
+      reply,
+      principal,
+      "model",
+      null,
+      decision.reason,
+    );
+  }
+
   // Recorded before the call is made, not after it returns. What is being
   // recorded is the gateway's decision to allow it, which is already final —
   // and evidence written afterwards would go missing exactly when the forward
   // did. A store that cannot accept the record stops the call: an allowed
   // request the store cannot vouch for is worse than a failed one.
   await audit.record({
-    identity: sessionIdentity(authentication.session),
+    identity: principal,
     tool: "model",
     resource: null,
     decision: "allow",
-    reason: "Run session is live; forwarded to the model API",
+    reason: decision.reason,
   });
 
   const body = request.body;
@@ -469,7 +503,10 @@ async function proxyTool(
   return forwardToTool(config, request, reply, tool, suffix);
 }
 
-/** One shape for every authorization refusal: 403, the reason, one record. */
+/**
+ * One shape for every authorization refusal, on either route: 403, the reason
+ * the caller is given, and one record carrying that same reason.
+ */
 async function deny(
   audit: AuditLog,
   request: FastifyRequest,
@@ -481,7 +518,7 @@ async function deny(
 ): Promise<FastifyReply> {
   request.log.warn(
     { reason, ...(tool ? { tool } : {}) },
-    "Gateway denied a tool call",
+    "Gateway denied an agent call",
   );
   await recordDenial(audit, request, identity, tool, resource, reason);
   return reply.code(403).send({ error: reason });
