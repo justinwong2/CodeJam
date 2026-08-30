@@ -598,11 +598,17 @@ describe("Documents in the browser", () => {
     // owner and one that did not must not look the same to the client.
     expect(response.statusCode).toBe(400);
     expect(
-      backing.listDocumentMetadata().some((doc) => doc.ownerId !== "user-a" &&
-        doc.title === "Claiming to be A's"),
+      backing
+        .listDocumentMetadata()
+        .some(
+          (doc) =>
+            doc.ownerId !== "user-a" && doc.title === "Claiming to be A's",
+        ),
     ).toBe(false);
     expect(
-      backing.listDocumentMetadata().some((doc) => doc.title === "Claiming to be A's"),
+      backing
+        .listDocumentMetadata()
+        .some((doc) => doc.title === "Claiming to be A's"),
     ).toBe(false);
     await app.close();
   });

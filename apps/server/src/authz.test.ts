@@ -88,9 +88,9 @@ describe("can()", () => {
       expect(
         visibleTo({ ownerId: "user-a", visibility: "private" }, "USER-A"),
       ).toBe(false);
-      expect(
-        visibleTo({ ownerId: "user-a", visibility: "private" }, ""),
-      ).toBe(false);
+      expect(visibleTo({ ownerId: "user-a", visibility: "private" }, "")).toBe(
+        false,
+      );
     });
   });
 
@@ -101,7 +101,10 @@ describe("can()", () => {
       const acting = principal(role);
       const roleGrants = ROLE_TOOLS[role].includes(tool);
       const owned = { ownerId: acting.ownerId, visibility: "private" as const };
-      const foreign = { ownerId: "someone-else", visibility: "private" as const };
+      const foreign = {
+        ownerId: "someone-else",
+        visibility: "private" as const,
+      };
       const shared = { ownerId: "someone-else", visibility: "public" as const };
 
       it(`${role} + ${tool} + no resource → ${roleGrants ? "allow" : "deny"}`, () => {
