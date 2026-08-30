@@ -57,7 +57,8 @@ Summary — canonical list is in [CLAUDE.md](CLAUDE.md#invariants-to-preserve).
 | `apps/server/src/authz.ts`                  | `can()`, roles, ownership rule  |
 | `apps/server/src/audit.ts`                  | Redacted record per decision    |
 | `apps/server/src/mock-tools.ts`             | docs/search/payments downstream |
-| `apps/web/src/App.tsx`                      | Entire UI                       |
+| `apps/web/src/App.tsx`                      | Entire UI (display-only)        |
+| `apps/web/src/api.ts`                       | Fetch wrappers, acting user     |
 | `docs/`                                     | Architecture, deployment, brief |
 
 Browser-facing routes live under `/api/*` behind the shared demo token,
@@ -71,7 +72,9 @@ including the operator's kill switch:
 
 Browser requests name the acting human with `x-launchpad-user` (a seeded user
 id; `user-a` when absent, `400` when unknown). It sets a created Agent's
-`ownerId`; the gateway never reads it.
+`ownerId`; the gateway never reads it. The dev user switcher in the web app is
+what chooses it — persisted in `localStorage` and attached by `api.ts` to every
+request. Like the Run evidence panel, it displays and names; it decides nothing.
 
 The agent-facing gateway is separate and deliberately outside that hook —
 agents authenticate with their own per-run credential, which the control plane

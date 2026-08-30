@@ -23,6 +23,15 @@ flowchart LR
 Lists Agents, manages lifecycle actions, submits prompts, and polls asynchronous
 Runs. It never receives the Ark API key.
 
+It also carries the browser-side half of the gateway story, and decides none of
+it. A dev user switcher names the seeded human a request acts as — sent as
+`x-launchpad-user`, persisted across reloads, and validated server-side — which
+is what a created Agent's `ownerId` is stamped from; each Agent is labelled with
+its owner. A per-Run evidence panel in the Playground reads
+`GET /api/runs/:id/audit` alongside the Run polling and renders that Run's
+decisions, denials distinguished, beside its token usage. Both are display-only:
+every row they show was enforced server-side before the Agent was answered.
+
 ### Fastify API
 
 Validates requests, protects remote demos with a shared bearer token, and

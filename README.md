@@ -8,9 +8,11 @@ Run it locally with Docker, Colima, or rootless Podman, or deploy it to
 Volcengine ECS.
 
 > [!WARNING]
-> This is a single-user proof of concept. It intentionally has no identity,
-> tracing, audit, or hardened sandbox middleware. Do not use production data or
-> credentials. See [SECURITY.md](SECURITY.md).
+> This is a proof of concept. Its users are seeded and its switcher is mock
+> authentication, not a login; there is no tracing and no hardened sandbox
+> beyond the container baseline. Authorization and the gateway audit trail are
+> real and server-side, but the store is single-process. Do not use production
+> data or credentials. See [SECURITY.md](SECURITY.md).
 
 ## Screenshots
 
@@ -26,6 +28,7 @@ Volcengine ECS.
 
 - React and TypeScript Web UI
 - Agent create, edit, start, stop, delete, and multi-turn chat
+- Dev user switcher and a per-Run gateway evidence panel, both display-only
 - Fastify control plane with asynchronous Run state
 - Persistent Agent workspaces and Codex sessions
 - Disposable Docker, Colima, or Podman container for each local turn
@@ -106,10 +109,13 @@ xdg-open http://localhost:3000   # Linux desktop
 
 In the Web UI:
 
-1. Select **Create Agent**.
-2. Enter a name, description, and workspace instructions.
-3. Select **Create Agent** again.
-4. Enter a task in the Playground, for example:
+1. Pick who you are acting as in the sidebar's **Acting as** switcher. Seeded
+   users are User A (`admin`) and User B (`basic`); the choice is remembered
+   across reloads and decides which user owns the Agents you create.
+2. Select **Create Agent**.
+3. Enter a name, description, and workspace instructions.
+4. Select **Create Agent** again.
+5. Enter a task in the Playground, for example:
 
    ```text
    Create a TypeScript hello-world CLI, add a test, and run it.
@@ -117,6 +123,13 @@ In the Web UI:
 
 The Agent can write files, run commands, and continue the same Codex session in
 later messages.
+
+Under the Playground composer, **Gateway evidence** fills in while the Run
+works: one row per decision the Agent Access Gateway made on its behalf — the
+tool, the resource, allow or deny, and the reason — with denials highlighted,
+next to the Run's token usage. Switching to User B and asking that user's Agent
+for `payments`, or for one of User A's documents, is how you see a denial. The
+panel only displays what the server already enforced and recorded.
 
 ### 5. Stop and resume
 

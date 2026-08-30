@@ -80,7 +80,7 @@ apps/
   web/           React 19 + Vite UI (@launchpad/web)
     src/
       main.tsx     React root
-      App.tsx      the entire UI (~720 lines, single component tree)
+      App.tsx      the entire UI (~900 lines, single component tree)
       api.ts       typed fetch wrappers for the control plane
       types.ts     UI-side mirrors of server types
 deploy/volcengine/   Terraform for optional ECS deployment
@@ -127,6 +127,27 @@ inventing new ones:
    records extend this. `JsonStore.initialize` migrates older files forward, so
    a new collection is an addition, not a breaking change.
 
+### Web UI
+
+The browser is **not** one of those seams: it shows what the server decided and
+enforces nothing. Two pieces of it exist for the gateway, and both are
+display-only on purpose — a UI-side check would score nothing and be bypassed by
+any client that is not this one.
+
+- **Dev user switcher.** `api.ts` owns which seeded user the browser acts as: it
+  reads the selection from `localStorage` at module load, writes it back on
+  every change, and attaches it as `x-launchpad-user` to every request. The
+  server validates the id and resolves that user's role; the browser never
+  sends a role or a permission. `App.tsx` renders the picker and labels each
+  Agent with its owner.
+- **Run evidence panel.** The Playground reads `GET /api/runs/:id/audit` on each
+  polling tick and renders the Run's decisions — tool, resource, decision,
+  reason — with denials visually distinct, beside the Run's token usage. It
+  never derives a decision, and shows an empty state rather than inventing one.
+
+`apps/web/src/types.ts` mirrors the server's `User`, `Role`, `AuditRecord`, and
+`Agent.ownerId`. The server's `types.ts` is canonical; keep the two in sync.
+
 ## API Endpoints
 
 All under `/api`. Auth is a single optional shared bearer token
@@ -155,7 +176,8 @@ All under `/api`. Auth is a single optional shared bearer token
 Browser requests name the human they act as with an `x-launchpad-user` header
 (a seeded user id; `user-a` when absent, `400` when unknown). This is mock
 authentication by design — the middleware being scored is authorization — and
-it decides which user a newly created Agent is owned by.
+it decides which user a newly created Agent is owned by. The web app's half of
+it is the dev user switcher in `api.ts` (see Web UI below).
 
 The Agent Access Gateway adds an **agent-facing** surface under `/gateway`.
 It is deliberately outside the `/api/*` auth hook: agents authenticate with
