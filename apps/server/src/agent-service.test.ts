@@ -421,3 +421,23 @@ describe("Agent lifecycle", () => {
     await expect.poll(() => service.getRun(run.id).status).toBe("completed");
   });
 });
+
+describe("Documents", () => {
+  it("stamps the owner it was given, never one smuggled inside the input", async () => {
+    const service = await makeService();
+    // The request boundary already rejects a body naming an owner; this pins
+    // the second layer, so a later `...input` spread in createDocument cannot
+    // quietly start honouring one if the boundary is ever loosened.
+    const smuggled = {
+      title: "Claimed",
+      content: "Owner must come from the second argument.",
+      visibility: "private",
+      ownerId: "user-a",
+    } as unknown as Parameters<AgentService["createDocument"]>[0];
+
+    const doc = await service.createDocument(smuggled, "user-b");
+
+    expect(doc.ownerId).toBe("user-b");
+    expect(service.findMockDoc(doc.id)?.ownerId).toBe("user-b");
+  });
+});
