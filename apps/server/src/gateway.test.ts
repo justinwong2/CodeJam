@@ -51,6 +51,17 @@ function serviceWith(...sessions: RunSession[]): AgentService {
   } as unknown as AgentService;
 }
 
+/** Like `serviceWith`, but the store refuses every audit write. */
+function serviceWithBrokenAudit(...sessions: RunSession[]): AgentService {
+  const service = serviceWith(...sessions) as unknown as {
+    appendAuditRecord: () => Promise<void>;
+  };
+  service.appendAuditRecord = async () => {
+    throw new Error("the store is not taking records");
+  };
+  return service as unknown as AgentService;
+}
+
 const temporaryDirectories: string[] = [];
 
 /** A real service over a temporary store, for the end-to-end revocation path. */
@@ -268,6 +279,57 @@ describe("Model gateway", () => {
     expect(persisted).not.toContain("the agent asked this");
     expect(persisted).not.toContain("the model said this");
     expect(persisted).not.toContain(ARK_KEY);
+    await app.close();
+  });
+
+  it("stops an allowed call whose record the store would not take", async () => {
+    const upstream = await startEchoUpstream();
+    const session = liveSession();
+    const app = await createApp(
+      configFor(upstream.baseUrl),
+      serviceWithBrokenAudit(session),
+    );
+
+    const response = await app.inject({
+      method: "POST",
+      url: "/gateway/v1/responses",
+      headers: {
+        "content-type": "application/json",
+        authorization: `Bearer ${credentialFor(session)}`,
+      },
+      payload: '{"model":"ep-test"}',
+    });
+
+    // An allowed call the store cannot vouch for is worse than a failed one:
+    // the forward never happens, so no upstream work goes unrecorded.
+    expect(response.statusCode).toBe(500);
+    expect(upstream.calls).toHaveLength(0);
+    expect(response.body).not.toContain(ARK_KEY);
+    await app.close();
+  });
+
+  it("lets a denial stand when its record could not be written", async () => {
+    const upstream = await startEchoUpstream();
+    const session = liveSession({ revoked: true });
+    const app = await createApp(
+      configFor(upstream.baseUrl),
+      serviceWithBrokenAudit(session),
+    );
+
+    const response = await app.inject({
+      method: "POST",
+      url: "/gateway/v1/responses",
+      headers: {
+        "content-type": "application/json",
+        authorization: `Bearer ${credentialFor(session)}`,
+      },
+      payload: '{"model":"ep-test"}',
+    });
+
+    // Evidence trouble must never rescue the caller: the refusal is what it
+    // was, and the upstream stays untouched.
+    expect(response.statusCode).toBe(401);
+    expect(upstream.calls).toHaveLength(0);
     await app.close();
   });
 
@@ -556,6 +618,42 @@ describe("Model gateway authentication", () => {
       tool: "model",
       decision: "deny",
       reason: "Run session revoked",
+    });
+  });
+
+  it("files an expired session's refusal against that run too", async () => {
+    const session = liveSession({
+      expiresAt: new Date(Date.now() - 1_000).toISOString(),
+    });
+    await expectDenied(session, {
+      authorization: `Bearer ${credentialFor(session, {
+        exp: Math.floor(Date.now() / 1_000) + 600,
+      })}`,
+    });
+
+    expect(stubAudit).toHaveLength(1);
+    expect(stubAudit[0]).toMatchObject({
+      runId: "run-1",
+      decision: "deny",
+      reason: "Run session expired",
+    });
+  });
+
+  it("attributes a claims-versus-session mismatch to the stored session", async () => {
+    const session = liveSession();
+    await expectDenied(session, {
+      authorization: `Bearer ${credentialFor(session, {
+        agentId: "another-agent",
+      })}`,
+    });
+
+    // The stored session is the identity; the disagreeing claims never are.
+    expect(stubAudit).toHaveLength(1);
+    expect(stubAudit[0]).toMatchObject({
+      agentId: "agent-1",
+      runId: "run-1",
+      decision: "deny",
+      reason: "Run credential does not match",
     });
   });
 
@@ -974,6 +1072,36 @@ describe("Tool gateway authentication", () => {
     await expectToolDenied(session, {
       authorization: `Bearer ${credentialFor(session)}`,
     });
+  });
+
+  it("files a revoked session's tool call against its run, tool and all", async () => {
+    const session = liveSession({ revoked: true });
+    await expectToolDenied(session, {
+      authorization: `Bearer ${credentialFor(session)}`,
+    });
+
+    // The tool proxy's refusals leave the same evidence the model proxy's do,
+    // named for the tool and resource the call asked about.
+    expect(stubAudit).toHaveLength(1);
+    expect(stubAudit[0]).toMatchObject({
+      humanId: "user-a",
+      agentId: "agent-1",
+      runId: "run-1",
+      tool: "docs",
+      resource: "docs/doc-a1",
+      decision: "deny",
+      reason: "Run session revoked",
+    });
+  });
+
+  it("files nothing for a tool call it cannot attribute to any run", async () => {
+    const session = liveSession();
+    const [header, claims] = credentialFor(session).split(".");
+    await expectToolDenied(session, {
+      authorization: `Bearer ${header}.${claims}.forged-signature`,
+    });
+
+    expect(stubAudit).toEqual([]);
   });
 });
 
