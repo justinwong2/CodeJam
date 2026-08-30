@@ -2,7 +2,7 @@ import path from "node:path";
 import { AgentService } from "./agent-service.js";
 import { createApp } from "./app.js";
 import { loadConfig } from "./config.js";
-import { createRunner } from "./runner-factory.js";
+import { createRunner, runnerGatewayBaseUrl } from "./runner-factory.js";
 import { JsonStore } from "./store.js";
 import { WorkspaceManager } from "./workspace.js";
 
@@ -11,7 +11,10 @@ import { WorkspaceManager } from "./workspace.js";
 const config = loadConfig();
 
 const store = new JsonStore(path.join(config.dataDirectory, "launchpad.json"));
-const workspaces = new WorkspaceManager(config.workspaceRoot);
+const workspaces = new WorkspaceManager(
+  config.workspaceRoot,
+  runnerGatewayBaseUrl(config),
+);
 const runner = createRunner(config);
 const service = new AgentService(config, store, workspaces, runner);
 await service.initialize();

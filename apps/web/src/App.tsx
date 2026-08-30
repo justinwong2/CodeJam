@@ -526,24 +526,43 @@ export default function App() {
   const [authInput, setAuthInput] = useState("");
   const messageEnd = useRef<HTMLDivElement>(null);
   const selectedIdRef = useRef<string | null>(null);
+  const actingUserRef = useRef(actingUser);
   const mountedRef = useRef(true);
   const pollingRunIds = useRef(new Set<string>());
   selectedIdRef.current = selectedId;
+  actingUserRef.current = actingUser;
 
-  const selected = useMemo(
-    () => agents.find((agent) => agent.id === selectedId) ?? null,
-    [agents, selectedId],
+  // Only the acting human's own Agents belong in the Playground sidebar — an
+  // Agent owned by whoever else is seeded is not this human's to select, and
+  // showing it invites picking someone else's conversation by accident. The
+  // Operator Console is the all-owners view; this one is scoped on purpose.
+  const visibleAgents = useMemo(
+    () => agents.filter((agent) => agent.ownerId === actingUser),
+    [agents, actingUser],
   );
 
-  const refreshAgents = useCallback(async () => {
-    const { agents: next } = await api.listAgents();
-    setAgents(next);
-    setSelectedId((current) =>
-      current && next.some((agent) => agent.id === current)
-        ? current
-        : (next[0]?.id ?? null),
-    );
-  }, []);
+  const selected = useMemo(
+    () => visibleAgents.find((agent) => agent.id === selectedId) ?? null,
+    [visibleAgents, selectedId],
+  );
+
+  // Stable identity on purpose: it composes into `bootstrap`, which the
+  // mount effect below depends on. Reading `actingUser` from a ref rather
+  // than closing over it keeps that effect from re-running (and re-asking
+  // for the shared access token) every time the user switcher changes.
+  const refreshAgents = useCallback(
+    async (ownerId: string = actingUserRef.current) => {
+      const { agents: next } = await api.listAgents();
+      setAgents(next);
+      setSelectedId((current) => {
+        const owned = next.filter((agent) => agent.ownerId === ownerId);
+        return current && owned.some((agent) => agent.id === current)
+          ? current
+          : (owned[0]?.id ?? null);
+      });
+    },
+    [],
+  );
 
   const refreshMessages = useCallback(async (agentId: string) => {
     const result = await api.messages(agentId);
@@ -569,7 +588,7 @@ export default function App() {
     setActingUser(id);
     setError(null);
     try {
-      await refreshAgents();
+      await refreshAgents(id);
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : String(reason));
     }
@@ -1053,10 +1072,10 @@ export default function App() {
 
         <div className="sidebar-label">
           <span>Agents</span>
-          <span>{agents.length}</span>
+          <span>{visibleAgents.length}</span>
         </div>
         <nav className="agent-list">
-          {agents.map((agent) => (
+          {visibleAgents.map((agent) => (
             <button
               className={
                 "agent-card " + (agent.id === selectedId ? "selected" : "")
@@ -1070,21 +1089,14 @@ export default function App() {
               <div className="agent-card-copy">
                 <strong>{agent.name}</strong>
                 <span>{agent.description || "Coding Agent"}</span>
-                <span
-                  className={
-                    "owner-tag " +
-                    (agent.ownerId === actingUser ? "owner-tag-self" : "")
-                  }
-                >
-                  {agent.ownerId === actingUser
-                    ? "Owned by you"
-                    : "Owned by " + ownerName(agent.ownerId)}
+                <span className="owner-tag owner-tag-self">
+                  Owned by {ownerName(agent.ownerId)}
                 </span>
               </div>
               <span className={"mini-dot mini-" + agent.status} />
             </button>
           ))}
-          {agents.length === 0 && (
+          {visibleAgents.length === 0 && (
             <div className="empty-sidebar">
               <span>◇</span>
               Create your first coding Agent.
