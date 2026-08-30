@@ -7,7 +7,13 @@ import { AgentService } from "./agent-service.js";
 import { createApp } from "./app.js";
 import { loadConfig } from "./config.js";
 import { JsonStore, SEED_USERS } from "./store.js";
-import type { Agent, AgentRunner, AuditRecord, User } from "./types.js";
+import type {
+  Agent,
+  AgentRunner,
+  AuditRecord,
+  RunnerResult,
+  User,
+} from "./types.js";
 import { WorkspaceManager } from "./workspace.js";
 
 const service = {
@@ -23,6 +29,22 @@ const idleRunner: AgentRunner = {
   isAvailable: async () => true,
 };
 
+/** A runner that keeps every credential it was handed, so a test can hunt for it. */
+function recordingRunner(): { runner: AgentRunner; runJwts: string[] } {
+  const runJwts: string[] = [];
+  return {
+    runJwts,
+    runner: {
+      run: async (request) => {
+        runJwts.push(request.runJwt);
+        return { output: "", threadId: null, usage: null };
+      },
+      cancel: async () => false,
+      isAvailable: async () => true,
+    },
+  };
+}
+
 const temporaryDirectories: string[] = [];
 
 afterEach(async () => {
@@ -34,7 +56,7 @@ afterEach(async () => {
 });
 
 /** An app over a real service, so ownership is asserted where it is stored. */
-async function appWithStore() {
+async function appWithStore(runner: AgentRunner = idleRunner) {
   const root = await mkdtemp(path.join(tmpdir(), "launchpad-app-test-"));
   temporaryDirectories.push(root);
   const config = loadConfig({
@@ -50,7 +72,7 @@ async function appWithStore() {
     config,
     new JsonStore(path.join(root, "data", "db.json")),
     new WorkspaceManager(path.join(root, "workspaces")),
-    idleRunner,
+    runner,
   );
   await backing.initialize();
   return { app: await createApp(config, backing), service: backing };
@@ -220,6 +242,211 @@ describe("Run audit trail", () => {
       url: `/api/runs/${randomUUID()}/audit`,
     });
     expect(response.statusCode).toBe(404);
+    await app.close();
+  });
+});
+
+describe("Operator console reads", () => {
+  /** A finished Run owned by `owner`, and the credential it was given. */
+  async function runFor(
+    app: Awaited<ReturnType<typeof appWithStore>>["app"],
+    backing: AgentService,
+    owner: string,
+    prompt: string,
+  ): Promise<string> {
+    const created = await createAgentAs(app, owner, "Console " + owner);
+    const started = await app.inject({
+      method: "POST",
+      url: `/api/agents/${created.agent?.id}/messages`,
+      headers: { "x-launchpad-user": owner },
+      payload: { content: prompt },
+    });
+    expect(started.statusCode).toBe(202);
+    const runId = (started.json() as { run: { id: string } }).run.id;
+    await expect.poll(() => backing.getRun(runId).status).toBe("completed");
+    return runId;
+  }
+
+  const record = (
+    runId: string,
+    ts: string,
+    humanId: string,
+    decision: "allow" | "deny",
+  ): AuditRecord => ({
+    id: randomUUID(),
+    ts,
+    humanId,
+    agentId: "agent-1",
+    runId,
+    tool: "docs",
+    resource: "docs/doc-a1",
+    decision,
+    reason: "recorded for the console",
+  });
+
+  it("shows every Run's decisions in one feed, ordered by ts", async () => {
+    const { app, service: backing } = await appWithStore();
+    const first = await runFor(app, backing, "user-a", "one");
+    const second = await runFor(app, backing, "user-b", "two");
+
+    // Interleaved and written out of order: the console reads a timeline, not
+    // a per-Run trail, so ordering is the endpoint's job rather than the UI's.
+    await backing.appendAuditRecord(
+      record(second, "2026-08-30T10:00:03.000Z", "user-b", "deny"),
+    );
+    await backing.appendAuditRecord(
+      record(first, "2026-08-30T10:00:01.000Z", "user-a", "allow"),
+    );
+    await backing.appendAuditRecord(
+      record(second, "2026-08-30T10:00:02.000Z", "user-b", "allow"),
+    );
+
+    const response = await app.inject({
+      method: "GET",
+      url: "/api/operator/audit",
+    });
+    expect(response.statusCode).toBe(200);
+    const audit = (response.json() as { audit: AuditRecord[] }).audit;
+    expect(audit.map((entry) => entry.ts)).toEqual([
+      "2026-08-30T10:00:01.000Z",
+      "2026-08-30T10:00:02.000Z",
+      "2026-08-30T10:00:03.000Z",
+    ]);
+    // Both Runs and both humans, which is exactly what a per-Run read cannot
+    // give the operator.
+    expect(new Set(audit.map((entry) => entry.runId))).toEqual(
+      new Set([first, second]),
+    );
+    await app.close();
+  });
+
+  it("shows sessions as claims and never the credential itself", async () => {
+    const { runner, runJwts } = recordingRunner();
+    const { app, service: backing } = await appWithStore(runner);
+    const runId = await runFor(app, backing, "user-b", "session please");
+    const runJwt = runJwts[0] ?? "";
+    expect(runJwt.length).toBeGreaterThan(0);
+
+    const response = await app.inject({
+      method: "GET",
+      url: "/api/operator/sessions",
+    });
+    expect(response.statusCode).toBe(200);
+    const sessions = (
+      response.json() as { sessions: Record<string, unknown>[] }
+    ).sessions;
+    expect(sessions).toHaveLength(1);
+    expect(sessions[0]).toEqual({
+      jti: expect.any(String),
+      agentId: expect.any(String),
+      ownerId: "user-b",
+      runId,
+      issuedAt: expect.any(String),
+      expiresAt: expect.any(String),
+      revoked: false,
+    });
+
+    // The whole point of a claims view: the token is not in it, in whole or in
+    // part. A console that rendered one would hand an onlooker a live agent
+    // identity, and the credential's own signature is what makes it one.
+    expect(response.body).not.toContain(runJwt);
+    for (const part of runJwt.split(".")) {
+      expect(response.body).not.toContain(part);
+    }
+    await app.close();
+  });
+
+  it("shows a live session, and shows it revoked once the operator revokes it", async () => {
+    // A run that never finishes, so its session is still live to be revoked —
+    // which is the state the console's Revoke button exists to act on.
+    let finish!: () => void;
+    const pending = new Promise<RunnerResult>((resolve) => {
+      finish = () => resolve({ output: "", threadId: null, usage: null });
+    });
+    const { app, service: backing } = await appWithStore({
+      run: () => pending,
+      cancel: async () => false,
+      isAvailable: async () => true,
+    });
+    const created = await createAgentAs(app, "user-a", "Long runner");
+    const agentId = created.agent?.id ?? "";
+    const started = await app.inject({
+      method: "POST",
+      url: `/api/agents/${agentId}/messages`,
+      payload: { content: "keep going" },
+    });
+    expect(started.statusCode).toBe(202);
+
+    const before = await app.inject({
+      method: "GET",
+      url: "/api/operator/sessions",
+    });
+    expect(
+      (before.json() as { sessions: { revoked: boolean }[] }).sessions,
+    ).toMatchObject([{ revoked: false }]);
+
+    const revoked = await app.inject({
+      method: "POST",
+      url: `/api/agents/${agentId}/revoke`,
+    });
+    expect(revoked.json()).toEqual({ revokedSessions: 1 });
+
+    const after = await app.inject({
+      method: "GET",
+      url: "/api/operator/sessions",
+    });
+    expect(
+      (after.json() as { sessions: { revoked: boolean }[] }).sessions,
+    ).toMatchObject([{ revoked: true }]);
+
+    finish();
+    await expect
+      .poll(() =>
+        backing.getRun((started.json() as { run: { id: string } }).run.id),
+      )
+      .toMatchObject({ status: "completed" });
+    await app.close();
+  });
+
+  it("shows document metadata and never document content", async () => {
+    const { app } = await appWithStore();
+    const response = await app.inject({
+      method: "GET",
+      url: "/api/operator/docs",
+    });
+
+    expect(response.statusCode).toBe(200);
+    const docs = (response.json() as { docs: Record<string, unknown>[] }).docs;
+    expect(docs).toEqual([
+      { id: "doc-a1", ownerId: "user-a" },
+      { id: "doc-a2", ownerId: "user-a" },
+      { id: "doc-b1", ownerId: "user-b" },
+    ]);
+    // Ground truth means "these documents exist and belong to these humans",
+    // never "here is what they say" — the console is not a way around the
+    // ownership rule the gateway enforces.
+    expect(response.body).not.toContain("quarterly plan");
+    expect(response.body).not.toContain("onboarding notes");
+    await app.close();
+  });
+
+  it("keeps the operator reads behind the shared token", async () => {
+    const app = await createApp(
+      loadConfig({
+        NODE_ENV: "test",
+        GATEWAY_JWT_SECRET: "gateway-test-signing-secret",
+        APP_AUTH_TOKEN: "a-strong-test-token",
+      }),
+      service,
+    );
+    for (const url of [
+      "/api/operator/audit",
+      "/api/operator/sessions",
+      "/api/operator/docs",
+    ]) {
+      const response = await app.inject({ method: "GET", url });
+      expect(response.statusCode).toBe(401);
+    }
     await app.close();
   });
 });

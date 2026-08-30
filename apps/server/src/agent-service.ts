@@ -15,8 +15,10 @@ import type {
   GatewayDirectory,
   Message,
   MockDoc,
+  MockDocMetadata,
   Role,
   RunSession,
+  RunSessionClaims,
   UpdateAgentInput,
   User,
 } from "./types.js";
@@ -377,6 +379,49 @@ export class AgentService implements GatewayDirectory {
         database.audit.filter((record) => record.runId === runId),
       )
       .sort((left, right) => left.ts.localeCompare(right.ts));
+  }
+
+  /**
+   * Every decision the gateway has reached, across every Agent and Run, oldest
+   * first. The per-Run trail explains one conversation; this is the timeline
+   * the Operator Console reads — a denial is often only legible beside what the
+   * same human was allowed a moment earlier.
+   */
+  listAuditRecords(): AuditRecord[] {
+    return this.store
+      .select((database) => database.audit)
+      .sort((left, right) => left.ts.localeCompare(right.ts));
+  }
+
+  /**
+   * Every run session, newest first, as claims. The projection is written out
+   * field by field on purpose: spreading the stored session would publish
+   * whatever it gains next, and a credential must never be among it.
+   */
+  listSessionClaims(): RunSessionClaims[] {
+    return this.store
+      .select((database) => database.sessions)
+      .sort((left, right) => right.createdAt.localeCompare(left.createdAt))
+      .map((session) => ({
+        jti: session.jwtId,
+        agentId: session.agentId,
+        ownerId: session.ownerId,
+        runId: session.runId,
+        issuedAt: session.createdAt,
+        expiresAt: session.expiresAt,
+        revoked: session.revoked,
+      }));
+  }
+
+  /**
+   * The documents that exist and who owns them — the ground truth an operator
+   * reads a scoped answer against. Metadata only, by the same field-by-field
+   * projection: content belongs to the owner, not to whoever opens the console.
+   */
+  listDocumentMetadata(): MockDocMetadata[] {
+    return this.store
+      .select((database) => database.docs)
+      .map((doc) => ({ id: doc.id, ownerId: doc.ownerId }));
   }
 
   /**

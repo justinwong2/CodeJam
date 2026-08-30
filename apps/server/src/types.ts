@@ -116,6 +116,33 @@ export interface RunSession {
 }
 
 /**
+ * A session as the Operator Console is allowed to see it: the claims, and
+ * nothing else. The raw credential is not in `RunSession` to begin with — this
+ * projection is what keeps it that way when the shape grows, since a field
+ * added to the session cannot reach the browser without being named here.
+ */
+export interface RunSessionClaims {
+  /** The credential's `jti` — the identifier, never the credential. */
+  jti: string;
+  agentId: string;
+  ownerId: string;
+  runId: string;
+  issuedAt: string;
+  expiresAt: string;
+  revoked: boolean;
+}
+
+/**
+ * A document as ground truth: it exists, and this human owns it. Deliberately
+ * not its content — the console shows the operator what the ownership rule is
+ * being applied to, and is not a way around that rule.
+ */
+export interface MockDocMetadata {
+  id: string;
+  ownerId: string;
+}
+
+/**
  * A document in the mock tool service. Ownership is the whole point of the
  * fixture: it is the resource `can()` compares an Agent's owner against, and
  * the thing an ownership denial protects.

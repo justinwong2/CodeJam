@@ -144,6 +144,21 @@ export async function createApp(
     return { user: await service.setUserRole(id, body.role) };
   });
 
+  // The Operator Console's three reads. Behind the shared token like the rest
+  // of /api, and read-only: the console displays what the server decided and
+  // triggers the two levers that already exist. It enforces nothing.
+  app.get("/api/operator/audit", async () => ({
+    audit: service.listAuditRecords(),
+  }));
+
+  app.get("/api/operator/sessions", async () => ({
+    sessions: service.listSessionClaims(),
+  }));
+
+  app.get("/api/operator/docs", async () => ({
+    docs: service.listDocumentMetadata(),
+  }));
+
   app.get("/api/agents", async () => ({ agents: service.listAgents() }));
 
   app.post("/api/agents", async (request, reply) => {
