@@ -4,11 +4,17 @@ import { ROLE_TOOLS } from "./types.js";
 import type { Principal, Role, ToolName } from "./types.js";
 
 const TOOLS: ToolName[] = ["model", "docs", "search", "payments"];
-const ROLES: Role[] = ["admin", "basic"];
+const ROLES: Role[] = ["admin", "basic", "suspended"];
+
+const OWNER_OF: Record<Role, string> = {
+  admin: "user-a",
+  basic: "user-b",
+  suspended: "user-c",
+};
 
 const principal = (role: Role): Principal => ({
-  humanId: role === "admin" ? "user-a" : "user-b",
-  ownerId: role === "admin" ? "user-a" : "user-b",
+  humanId: OWNER_OF[role],
+  ownerId: OWNER_OF[role],
   agentId: "agent-1",
   runId: "run-1",
   role,
@@ -23,7 +29,24 @@ describe("can()", () => {
     expect(ROLE_TOOLS).toEqual({
       admin: ["model", "docs", "search", "payments"],
       basic: ["model", "docs", "search"],
+      suspended: [],
     });
+  });
+
+  // Suspension is total by construction: an empty grant list means every tool,
+  // the model included, is refused without `can()` learning a new rule.
+  it("denies a suspended owner every tool, model included, with a reason", () => {
+    const suspended = principal("suspended");
+    for (const tool of TOOLS) {
+      const decision = can(suspended, tool);
+      expect(decision.allow).toBe(false);
+      expect(decision.reason).toContain("suspended");
+      expect(decision.reason).toContain(tool);
+    }
+    // Owning the resource does not rescue it: the role is checked first.
+    const owned = can(suspended, "docs", { ownerId: suspended.ownerId });
+    expect(owned.allow).toBe(false);
+    expect(owned.reason.length).toBeGreaterThan(0);
   });
 
   // The frozen contract in one table: allow iff the role grants the tool and,

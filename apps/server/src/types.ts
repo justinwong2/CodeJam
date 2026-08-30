@@ -4,7 +4,10 @@ export type RunStatus =
 export type MessageRole = "user" | "assistant";
 
 /** Seeded, prebuilt roles. Custom-role authoring is deliberately out of scope. */
-export type Role = "admin" | "basic";
+export type Role = "admin" | "basic" | "suspended";
+
+/** The roles an operator may assign. Assigning is in scope; authoring is not. */
+export const ROLE_NAMES = ["admin", "basic", "suspended"] as const;
 
 /** Everything the gateway can be asked to reach on an Agent's behalf. */
 export const TOOL_NAMES = ["model", "docs", "search", "payments"] as const;
@@ -21,10 +24,15 @@ export interface User {
  * Role → permitted tools. Server-side only: permissions are resolved from the
  * owner on every call, never carried in a run credential, so a role change or
  * a revocation takes effect on the agent's next call instead of at expiry.
+ *
+ * `suspended` grants nothing at all — not even the model. It needs no rule of
+ * its own: an empty list already denies every tool, with the same legible
+ * reason every other role denial carries.
  */
 export const ROLE_TOOLS: Record<Role, ToolName[]> = {
   admin: ["model", "docs", "search", "payments"],
   basic: ["model", "docs", "search"],
+  suspended: [],
 };
 
 /**
