@@ -6,7 +6,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { AgentService } from "./agent-service.js";
 import { createApp } from "./app.js";
 import { loadConfig } from "./config.js";
-import { JsonStore, SEED_USERS } from "./store.js";
+import { JsonStore, SEED_DOCS, SEED_USERS } from "./store.js";
 import type {
   Agent,
   AgentRunner,
@@ -417,16 +417,53 @@ describe("Operator console reads", () => {
 
     expect(response.statusCode).toBe(200);
     const docs = (response.json() as { docs: Record<string, unknown>[] }).docs;
+    // Every document, whoever owns it and whatever its visibility: the console
+    // is the ground truth a scoped answer is narrated against, and a filtered
+    // row leaves no trace of its own anywhere else.
     expect(docs).toEqual([
-      { id: "doc-a1", ownerId: "user-a" },
-      { id: "doc-a2", ownerId: "user-a" },
-      { id: "doc-b1", ownerId: "user-b" },
+      {
+        id: "doc-a1",
+        title: "User A quarterly plan",
+        ownerId: "user-a",
+        visibility: "private",
+      },
+      {
+        id: "doc-a2",
+        title: "User A meeting notes",
+        ownerId: "user-a",
+        visibility: "private",
+      },
+      {
+        id: "doc-b1",
+        title: "User B onboarding notes",
+        ownerId: "user-b",
+        visibility: "private",
+      },
+      {
+        id: "kb-1",
+        title: "Agent Access Gateway",
+        ownerId: "user-a",
+        visibility: "public",
+      },
+      {
+        id: "kb-2",
+        title: "Run credentials",
+        ownerId: "user-a",
+        visibility: "public",
+      },
+      {
+        id: "kb-3",
+        title: "Role-based tool access",
+        ownerId: "user-a",
+        visibility: "public",
+      },
     ]);
-    // Ground truth means "these documents exist and belong to these humans",
-    // never "here is what they say" — the console is not a way around the
-    // ownership rule the gateway enforces.
-    expect(response.body).not.toContain("quarterly plan");
-    expect(response.body).not.toContain("onboarding notes");
+    // Ground truth means "these documents exist, belong to these humans, and
+    // are public or private", never "here is what they say" — the console is
+    // not a way around the rule the gateway enforces.
+    for (const doc of SEED_DOCS) {
+      expect(response.body).not.toContain(doc.content);
+    }
     await app.close();
   });
 

@@ -26,25 +26,57 @@ export const SEED_USERS: User[] = [
 ];
 
 /**
- * The mock tool service's documents, one set per demo human. They exist to give
- * ownership something to be about: A's documents are what B's Agent is denied,
- * so the fixture is split across both owners deliberately.
+ * The mock tool service's documents. They exist to give ownership and
+ * visibility something to be about: A's private documents are what B's Agent is
+ * refused, so the fixture is split across both owners deliberately, and the
+ * three public ones are what a scoped search returns to everybody. A public
+ * document still has one owner — visibility never transfers ownership.
  */
 export const SEED_DOCS: MockDoc[] = [
   {
     id: "doc-a1",
     ownerId: DEFAULT_OWNER_ID,
+    title: "User A quarterly plan",
     content: "User A quarterly plan: migrate the Runtime to the gateway.",
+    visibility: "private",
   },
   {
     id: "doc-a2",
     ownerId: DEFAULT_OWNER_ID,
+    title: "User A meeting notes",
     content: "User A meeting notes: agree the rollout order with the team.",
+    visibility: "private",
   },
   {
     id: "doc-b1",
     ownerId: "user-b",
+    title: "User B onboarding notes",
     content: "User B onboarding notes: how to file a Runtime access request.",
+    visibility: "private",
+  },
+  {
+    id: "kb-1",
+    ownerId: DEFAULT_OWNER_ID,
+    title: "Agent Access Gateway",
+    content:
+      "Agents call the platform gateway, which holds the credentials they do not.",
+    visibility: "public",
+  },
+  {
+    id: "kb-2",
+    ownerId: DEFAULT_OWNER_ID,
+    title: "Run credentials",
+    content:
+      "Each run is issued a short-lived credential the control plane can revoke.",
+    visibility: "public",
+  },
+  {
+    id: "kb-3",
+    ownerId: DEFAULT_OWNER_ID,
+    title: "Role-based tool access",
+    content:
+      "A role grants tools; ownership decides which resources those tools may touch.",
+    visibility: "public",
   },
 ];
 
@@ -74,6 +106,20 @@ function seeded<T extends { id: string }>(stored: T[], seeds: T[]): T[] {
     ...stored,
     ...seeds.filter((row) => !present.has(row.id)).map((row) => ({ ...row })),
   ];
+}
+
+/**
+ * Documents stored before visibility existed are private, and so is anything
+ * the file cannot account for. The default is the safe direction on purpose: a
+ * document whose visibility a loader had to guess must never be guessed
+ * readable by everybody. A missing title costs nothing but a name.
+ */
+function withVisibility(docs: MockDoc[]): MockDoc[] {
+  return docs.map((doc) => ({
+    ...doc,
+    title: typeof doc.title === "string" ? doc.title : "Untitled document",
+    visibility: doc.visibility === "public" ? "public" : "private",
+  }));
 }
 
 /** Agents stored before ownership existed belong to the default owner. */
@@ -110,7 +156,7 @@ export function migrateDatabase(parsed: unknown): Database {
     runs: collection<AgentRun>(source.runs),
     sessions: collection<RunSession>(source.sessions),
     users: seeded(collection<User>(source.users), SEED_USERS),
-    docs: seeded(collection<MockDoc>(source.docs), SEED_DOCS),
+    docs: seeded(withVisibility(collection<MockDoc>(source.docs)), SEED_DOCS),
     audit: collection<AuditRecord>(source.audit),
   };
 }

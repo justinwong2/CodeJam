@@ -414,14 +414,21 @@ export class AgentService implements GatewayDirectory {
   }
 
   /**
-   * The documents that exist and who owns them — the ground truth an operator
-   * reads a scoped answer against. Metadata only, by the same field-by-field
-   * projection: content belongs to the owner, not to whoever opens the console.
+   * The documents that exist, who owns them, and whether they are public — the
+   * ground truth an operator reads a scoped answer against, since a filtered
+   * row leaves no audit trace of its own. Metadata only, by the same
+   * field-by-field projection: content belongs to the owner, not to whoever
+   * opens the console.
    */
   listDocumentMetadata(): MockDocMetadata[] {
     return this.store
       .select((database) => database.docs)
-      .map((doc) => ({ id: doc.id, ownerId: doc.ownerId }));
+      .map((doc) => ({
+        id: doc.id,
+        title: doc.title,
+        ownerId: doc.ownerId,
+        visibility: doc.visibility,
+      }));
   }
 
   /**

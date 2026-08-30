@@ -133,24 +133,39 @@ export interface RunSessionClaims {
 }
 
 /**
- * A document as ground truth: it exists, and this human owns it. Deliberately
- * not its content — the console shows the operator what the ownership rule is
- * being applied to, and is not a way around that rule.
+ * Who may read a Document besides its Owner. A public Document still has
+ * exactly one Owner — visibility never transfers ownership — and the value is
+ * chosen at creation and immutable after it. Anything a stored file cannot
+ * account for loads as `private`, which is the safe direction.
+ */
+export type Visibility = "public" | "private";
+
+/** The visibilities an Upload may choose between. */
+export const VISIBILITY_NAMES = ["public", "private"] as const;
+
+/**
+ * A document as ground truth: it exists, this human owns it, and it is public
+ * or private. Deliberately not its content — the console shows the operator
+ * what the visibility rule is being applied to, and is not a way around it.
  */
 export interface MockDocMetadata {
   id: string;
+  title: string;
   ownerId: string;
+  visibility: Visibility;
 }
 
 /**
- * A document in the mock tool service. Ownership is the whole point of the
- * fixture: it is the resource `can()` compares an Agent's owner against, and
- * the thing an ownership denial protects.
+ * A document in the mock tool service. Ownership and visibility are the whole
+ * point of the fixture: together they are the resource `visibleTo()` decides
+ * about, and the thing an ownership denial protects.
  */
 export interface MockDoc {
   id: string;
   ownerId: string;
+  title: string;
   content: string;
+  visibility: Visibility;
 }
 
 /**
@@ -197,6 +212,17 @@ export interface UpdateAgentInput {
   name?: string | undefined;
   description?: string | undefined;
   instructions?: string | undefined;
+}
+
+/**
+ * An Upload, as the request boundary hands it over. The Owner is deliberately
+ * absent: it is the acting human, resolved server-side, never a field a client
+ * can name.
+ */
+export interface CreateDocumentInput {
+  title: string;
+  content: string;
+  visibility: Visibility;
 }
 
 export interface RunnerResult {

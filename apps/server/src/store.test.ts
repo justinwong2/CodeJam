@@ -206,13 +206,45 @@ describe("Seeded users and ownership", () => {
     );
   });
 
-  it("adds a missing seeded document without rewriting a stored one", async () => {
+  it("seeds private documents beside public ones, each with a title", async () => {
+    const filePath = await temporaryFile();
+    const store = new JsonStore(filePath);
+    await store.initialize();
+    const docs = store.snapshot().docs;
+
+    // Both visibilities have to exist for scoping to be demonstrable: the
+    // private rows are what a foreign principal never sees, the public rows are
+    // what everybody's search returns.
+    expect(docs.filter((doc) => doc.visibility === "private")).toHaveLength(3);
+    expect(
+      docs
+        .filter((doc) => doc.visibility === "public")
+        .map((doc) => doc.id)
+        .sort(),
+    ).toEqual(["kb-1", "kb-2", "kb-3"]);
+    // A public document is still owned by somebody; visibility is not a way of
+    // having no owner.
+    for (const doc of docs) {
+      expect(doc.ownerId.length).toBeGreaterThan(0);
+      expect(doc.title.length).toBeGreaterThan(0);
+    }
+  });
+
+  it("loads a document stored without a visibility as private, and keeps it", async () => {
     const filePath = await temporaryFile();
     await writeFile(
       filePath,
       JSON.stringify({
         version: DATABASE_VERSION,
-        docs: [{ id: "doc-a1", ownerId: "user-b", content: "reassigned" }],
+        docs: [
+          { id: "doc-a1", ownerId: "user-b", content: "reassigned" },
+          {
+            id: "doc-legacy",
+            ownerId: "user-b",
+            content: "written before visibility existed",
+            visibility: "unknown-to-this-server",
+          },
+        ],
       }),
       "utf8",
     );
@@ -220,12 +252,34 @@ describe("Seeded users and ownership", () => {
     const store = new JsonStore(filePath);
     await store.initialize();
     const docs = store.snapshot().docs;
+    // The stored rows keep their owner and content and gain the safe default —
+    // a visibility a loader had to guess is never guessed readable by everyone.
     expect(docs[0]).toEqual({
       id: "doc-a1",
       ownerId: "user-b",
+      title: "Untitled document",
       content: "reassigned",
+      visibility: "private",
     });
-    expect(docs.map((doc) => doc.id)).toEqual(SEED_DOCS.map((doc) => doc.id));
+    expect(docs[1]?.visibility).toBe("private");
+    expect(docs.map((doc) => doc.id)).toEqual([
+      "doc-a1",
+      "doc-legacy",
+      ...SEED_DOCS.filter((doc) => doc.id !== "doc-a1").map((doc) => doc.id),
+    ]);
+
+    // The default is durable: it survives the write-back and a reopen.
+    const reopened = new JsonStore(filePath);
+    await reopened.initialize();
+    expect(
+      reopened.snapshot().docs.find((doc) => doc.id === "doc-legacy"),
+    ).toEqual({
+      id: "doc-legacy",
+      ownerId: "user-b",
+      title: "Untitled document",
+      content: "written before visibility existed",
+      visibility: "private",
+    });
   });
 
   it("gives an Agent stored before ownership existed the default owner", async () => {
