@@ -77,6 +77,10 @@ one opaque unit and cannot authorize the calls Codex makes inside it.
 
 ### Contract 1 — Gateway HTTP (frozen day 1)
 
+> **Amended 2026-08-30** — see [Amendments](#amendments-2026-08-30): ownership
+> denials on `docs` now answer `404` (A1), and model calls are role-checked
+> (A2). The text below is the day-1 contract, kept verbatim.
+
 - `POST /gateway/v1/responses` — model proxy. Accepts the OpenAI-compatible
   Responses request body Codex sends; `Authorization: Bearer <RUN_JWT>`.
   Verifies JWT → (model calls need no tool-RBAC) → injects `ARK_API_KEY` →
@@ -91,6 +95,10 @@ tool, resource?)` → injects that tool's credential → forwards to the mock to
   responding.
 
 ### Contract 2 — Authorization (frozen day 1)
+
+> **Amended 2026-08-30** — see [Amendments](#amendments-2026-08-30): the
+> ownership rule becomes "owned **or** public" via a `visibility` field on the
+> resource (A3). The text below is the day-1 contract, kept verbatim.
 
 ```ts
 // can() is the single authorization entry point; gateway routes and the
@@ -262,3 +270,83 @@ mocked so tests spend no real tokens.
 
 Critical path: Track A's day-1 passthrough proves streaming + reachability;
 everything else integrates against a stub gateway until A is real.
+
+## Amendments (2026-08-30)
+
+All six original slices shipped against the day-1 contracts. The design
+discussion for slices 7 (Operator Console) and 8 (Documents) amended them as
+recorded here — loudly, per the drift-control rules, never silently. Domain
+language for the new concepts (Invisible, Visibility, Scope, Suspended,
+Operator Console) lives in [/CONTEXT.md](../../CONTEXT.md); the
+invisible-over-denied decision has its own ADR:
+[../adr/2026-08-30-invisible-documents.md](../adr/2026-08-30-invisible-documents.md).
+
+### A1 — Ownership denial on `docs` answers `404` (amends Contract 1)
+
+**Was:** `403` on ownership denial. **Now:** a direct fetch of a document the
+principal may not read returns the same `404 { error: "Document not found" }`
+— status and body identical — that a nonexistent id returns. The audit record
+still carries the true `deny` / ownership reason; the agent-facing answer and
+the audit deliberately diverge. Tool-RBAC denials remain `403`: they name a
+tool, not a resource, so they disclose nothing about any document. Rationale,
+trade-offs, and alternatives: see the ADR above.
+
+### A2 — Model calls are role-checked (amends Contract 1)
+
+**Was:** "(model calls need no tool-RBAC)." **Now:** the model proxy resolves
+the principal and runs `can(principal, "model")` before forwarding; a role
+that does not grant `model` → `403` with one audit `deny` row, upstream never
+called. This turns `ROLE_TOOLS`'s hitherto-unread `model` entry into real
+policy, and is what makes the `suspended` role (A4) total: a suspended owner's
+agent loses the model, not just the tools. `401` remains the answer for
+authentication failures, `403` for authorization.
+
+### A3 — `can()` learns visibility (amends Contract 2)
+
+The resource parameter becomes `{ ownerId, visibility }`. Rule: allow iff the
+role grants the tool **and**, when a resource is named, the principal owns it
+**or** its visibility is `public`. The predicate has exactly one home — a pure
+`visibleTo(doc, ownerId)` in `authz.ts` — imported by both the gateway
+(direct fetch) and the mock tool service (search scoping, A5). The
+`(principal, tool, resource, scope)` generalization was anticipated by the
+ADR's Follow-Up; this is that extension, not scope creep.
+
+### A4 — The `suspended` role (amends the Data Contract)
+
+`Role` gains a third value: `"suspended"`, with `ROLE_TOOLS.suspended = []`.
+A suspended owner's agents are refused every gateway call — model included
+(A2) — on the next per-call lookup, while their run credential stays valid,
+unexpired, and unrevoked. The credential is identity, never permission;
+suspension is a store write, not a token event. Assigning roles (including
+`suspended`) from the Operator Console is in scope; authoring roles remains
+deferred.
+
+### A5 — Search is scoped by the gateway, applied by the tool
+
+The gateway resolves the principal and forwards the authorized scope — the
+principal's owner id — in an `x-launchpad-scope` header beside the existing
+tool credential. The tool service filters search results with the shared
+`visibleTo` predicate, mechanically: it never learns roles and cannot widen
+the scope. A missing scope header is refused (fail closed — only the gateway
+can reach the service, so absence means a gateway bug). The gateway continues
+to forward response bytes unparsed. `SEARCH_CORPUS` is retired: its entries
+become seeded **public** documents, so search reads the one real document
+collection and the now-false comment in `mock-tools.ts` about unscoped search
+is replaced.
+
+### A6 — Documents get `visibility`, uploads, and browser surfaces
+
+`MockDoc` gains `visibility: "public" | "private"`; the tolerant loader
+defaults missing values to `private`. Humans get a browser surface under
+`/api`: a listing scoped by the same `visibleTo` predicate (own + public,
+no operator override on this surface), and create-only upload — small text
+content, visibility fixed at creation, owner always resolved server-side from
+`x-launchpad-user`, never from the body. No edit, delete, toggle, sharing,
+or groups. Audit records continue to store resource identifiers only, never
+document content.
+
+Implementation is sliced in
+[../issues/slices-operator-console-and-documents.md](../issues/slices-operator-console-and-documents.md):
+slice 7 (Operator Console + suspended role + A2) lands before slice 8
+(documents, A1/A3/A5/A6), so the console's decision feed and ground-truth
+table are running while the document work is built and demoed.
