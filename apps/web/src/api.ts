@@ -3,11 +3,13 @@ import type {
   AgentRun,
   AuditRecord,
   Message,
+  MockDoc,
   MockDocMetadata,
   Role,
   RunSessionClaims,
   SystemInfo,
   User,
+  Visibility,
 } from "./types";
 import { DEFAULT_OWNER_ID } from "./types";
 
@@ -132,6 +134,19 @@ export const api = {
         body: JSON.stringify({ content }),
       },
     ),
+  // The human half of the document surface. The server scopes the listing to
+  // the acting user and stamps the owner on an upload; the browser names
+  // neither, and could not make either stick if it tried.
+  docs: () => request<{ docs: MockDoc[] }>("/api/docs"),
+  uploadDoc: (body: {
+    title: string;
+    content: string;
+    visibility: Visibility;
+  }) =>
+    request<{ doc: MockDoc }>("/api/docs", {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
   run: (id: string) => request<{ run: AgentRun }>("/api/runs/" + id),
   runAudit: (id: string) =>
     request<{ audit: AuditRecord[] }>("/api/runs/" + id + "/audit"),

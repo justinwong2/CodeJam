@@ -48,10 +48,18 @@ const messageBody = z.object({
 const MAXIMUM_DOCUMENT_CONTENT = 4_000;
 
 /**
- * Plain text: anything but the control characters that would make a "document"
- * something other than something to read. Newlines and tabs are text.
+ * Plain text: no control characters beyond the ones prose is written with. An
+ * Upload is something to read, so content carrying a NUL or an escape is
+ * refused rather than stored and handed to an Agent later.
  */
-const CONTROL_CHARACTERS = /[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/;
+function isPlainText(value: string): boolean {
+  for (const character of value) {
+    const code = character.codePointAt(0) ?? 0;
+    const written = code === 0x09 || code === 0x0a || code === 0x0d;
+    if (!written && (code < 0x20 || code === 0x7f)) return false;
+  }
+  return true;
+}
 
 /**
  * An Upload, as a client may express it. `strictObject` is the enforcement of
@@ -65,10 +73,7 @@ const createDocumentBody = z.strictObject({
     .string()
     .min(1)
     .max(MAXIMUM_DOCUMENT_CONTENT)
-    .refine(
-      (value) => !CONTROL_CHARACTERS.test(value),
-      "A document must be plain text",
-    ),
+    .refine(isPlainText, "A document must be plain text"),
   visibility: z.enum(VISIBILITY_NAMES),
 });
 

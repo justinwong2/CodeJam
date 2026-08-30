@@ -1560,3 +1560,40 @@ textarea:focus {
   font-weight: 600;
   color: #5f6058;
 }
+
+/* Documents. Visibility is a fact the server holds; this only shows it. */
+.visibility-chip {
+  border-radius: 999px;
+  padding: 3px 8px;
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  border: 1px solid var(--line);
+  color: var(--muted);
+}
+
+.visibility-public {
+  border-color: #b6ddc9;
+  background: #eaf6f0;
+  color: var(--green);
+}
+
+.visibility-private {
+  border-color: #d8d5c9;
+  background: #f4f2ea;
+  color: #6f7068;
+}
+
+.doc-form {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.doc-form .panel-footer span {
+  max-width: 62ch;
+  color: var(--muted);
+  font-size: 10px;
+  line-height: 1.5;
+}

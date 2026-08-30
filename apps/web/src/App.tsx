@@ -11,13 +11,15 @@ import type {
   AgentRun,
   AuditRecord,
   Message,
+  MockDoc,
   MockDocMetadata,
   Role,
   RunSessionClaims,
   SystemInfo,
   User,
+  Visibility,
 } from "./types";
-import { ROLE_NAMES } from "./types";
+import { ROLE_NAMES, VISIBILITY_NAMES } from "./types";
 
 const starterPrompts = [
   "Create a small TypeScript CLI that prints a weather summary from sample JSON.",
@@ -249,22 +251,34 @@ function OperatorConsole({
         <div className="console-panel-head">
           <h2>Documents</h2>
           <span>
-            Ground truth: which documents exist and who owns them. Metadata only
-            — content belongs to the owner, not to whoever opens this page.
+            Ground truth: which documents exist, who owns them, and which are
+            public. Read a scoped search against this — a filtered-out row is
+            invisible in the answer and leaves no decision behind. Metadata
+            only: content belongs to the owner, not to whoever opens this page.
           </span>
         </div>
         <table className="console-table">
           <thead>
             <tr>
               <th>Document</th>
+              <th>Title</th>
               <th>Owner</th>
+              <th>Visibility</th>
             </tr>
           </thead>
           <tbody>
             {docs.map((doc) => (
               <tr key={doc.id}>
                 <td className="mono">{doc.id}</td>
+                <td>{doc.title}</td>
                 <td>{ownerName(doc.ownerId)}</td>
+                <td>
+                  <span
+                    className={"visibility-chip visibility-" + doc.visibility}
+                  >
+                    {doc.visibility}
+                  </span>
+                </td>
               </tr>
             ))}
           </tbody>
@@ -306,6 +320,174 @@ function OperatorConsole({
   );
 }
 
+/**
+ * The human half of the document surface: what the acting user may see, and the
+ * form that adds one. It displays and it asks — the list is whatever the server
+ * answered for this user, scoped by the same predicate that scopes an Agent's
+ * search, and the owner of an upload is decided server-side from the acting
+ * user, never from anything typed here.
+ */
+function DocumentsPanel({
+  docs,
+  actingUserName,
+  ownerName,
+  form,
+  onFormChange,
+  onUpload,
+  busy,
+}: {
+  docs: MockDoc[];
+  actingUserName: string;
+  ownerName: (ownerId: string) => string;
+  form: { title: string; content: string; visibility: Visibility };
+  onFormChange: (form: {
+    title: string;
+    content: string;
+    visibility: Visibility;
+  }) => void;
+  onUpload: (event: React.FormEvent) => void;
+  busy: boolean;
+}) {
+  return (
+    <section className="console">
+      <header className="console-header">
+        <div>
+          <span className="eyebrow">Documents</span>
+          <h1>What {actingUserName} may see</h1>
+          <p>
+            Their own documents and every public one — the same rule the gateway
+            scopes an Agent&apos;s search with, applied server-side to this
+            listing. Switch the acting user and the list changes with them.
+          </p>
+        </div>
+        <div className="console-counts">
+          <span>
+            <strong>{docs.length}</strong> visible
+          </span>
+          <span>
+            <strong>
+              {docs.filter((doc) => doc.visibility === "public").length}
+            </strong>{" "}
+            public
+          </span>
+        </div>
+      </header>
+
+      <div className="console-panel">
+        <div className="console-panel-head">
+          <h2>Upload a document</h2>
+          <span>
+            Plain text, a few KB. Visibility is chosen once, here: there is no
+            toggle afterwards. The server records{" "}
+            <strong>{actingUserName}</strong> as its owner.
+          </span>
+        </div>
+        <form className="doc-form" onSubmit={onUpload}>
+          <div className="form-grid">
+            <label>
+              Title
+              <input
+                value={form.title}
+                onChange={(event) =>
+                  onFormChange({ ...form, title: event.target.value })
+                }
+                placeholder="Q3 rollout notes"
+                required
+                maxLength={120}
+              />
+            </label>
+            <label>
+              Visibility
+              <select
+                value={form.visibility}
+                onChange={(event) =>
+                  onFormChange({
+                    ...form,
+                    visibility: event.target.value as Visibility,
+                  })
+                }
+              >
+                {VISIBILITY_NAMES.map((visibility) => (
+                  <option key={visibility} value={visibility}>
+                    {visibility}
+                  </option>
+                ))}
+              </select>
+            </label>
+          </div>
+          <label>
+            Content
+            <textarea
+              value={form.content}
+              onChange={(event) =>
+                onFormChange({ ...form, content: event.target.value })
+              }
+              rows={4}
+              maxLength={4_000}
+              placeholder="Anything an Agent might be asked to read."
+              required
+            />
+          </label>
+          <div className="panel-footer">
+            <span>
+              A private document is invisible to everybody else — absent from
+              their listing, absent from their Agents&apos; search, and a direct
+              fetch by id answers as if it never existed.
+            </span>
+            <button className="button button-primary" disabled={busy}>
+              {busy ? <Spinner /> : "Upload"}
+            </button>
+          </div>
+        </form>
+      </div>
+
+      <div className="console-panel">
+        <div className="console-panel-head">
+          <h2>Visible documents</h2>
+          <span>
+            Owner and visibility as the store holds them. Nothing here is
+            filtered in the browser: this is the server&apos;s answer for this
+            user.
+          </span>
+        </div>
+        <table className="console-table">
+          <thead>
+            <tr>
+              <th>Document</th>
+              <th>Title</th>
+              <th>Owner</th>
+              <th>Visibility</th>
+            </tr>
+          </thead>
+          <tbody>
+            {docs.map((doc) => (
+              <tr key={doc.id}>
+                <td className="mono">{doc.id}</td>
+                <td>{doc.title}</td>
+                <td>{ownerName(doc.ownerId)}</td>
+                <td>
+                  <span
+                    className={"visibility-chip visibility-" + doc.visibility}
+                  >
+                    {doc.visibility}
+                  </span>
+                </td>
+              </tr>
+            ))}
+            {docs.length === 0 && (
+              <tr>
+                <td colSpan={4} className="console-empty">
+                  Nothing visible to this user yet.
+                </td>
+              </tr>
+            )}
+          </tbody>
+        </table>
+      </div>
+    </section>
+  );
+}
+
 export default function App() {
   const [agents, setAgents] = useState<Agent[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
@@ -323,7 +505,17 @@ export default function App() {
     records: AuditRecord[];
   } | null>(null);
   const [busy, setBusy] = useState(false);
-  const [showConsole, setShowConsole] = useState(false);
+  // Which surface is on screen. The Playground is one Agent's conversation, the
+  // console is every decision, and Documents is what this human may see.
+  const [view, setView] = useState<"playground" | "console" | "documents">(
+    "playground",
+  );
+  const [docs, setDocs] = useState<MockDoc[]>([]);
+  const [docForm, setDocForm] = useState<{
+    title: string;
+    content: string;
+    visibility: Visibility;
+  }>({ title: "", content: "", visibility: "private" });
   const [operatorData, setOperatorData] = useState<{
     audit: AuditRecord[];
     sessions: RunSessionClaims[];
@@ -415,6 +607,36 @@ export default function App() {
       await Promise.all([refreshConsole(), refreshAgents()]);
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : String(reason));
+    }
+  };
+
+  /**
+   * The documents the server says this human may see. Re-read whenever the
+   * acting user changes, because the answer is scoped to whoever asked — the
+   * browser never filters a list it was given.
+   */
+  const refreshDocs = useCallback(async () => {
+    const result = await api.docs();
+    if (mountedRef.current) setDocs(result.docs);
+  }, []);
+
+  /** Uploads a document. The server stamps the owner and fixes the visibility. */
+  const uploadDocument = async (event: React.FormEvent) => {
+    event.preventDefault();
+    setBusy(true);
+    setError(null);
+    try {
+      await api.uploadDoc({
+        title: docForm.title.trim(),
+        content: docForm.content,
+        visibility: docForm.visibility,
+      });
+      setDocForm({ title: "", content: "", visibility: "private" });
+      await refreshDocs();
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : String(reason));
+    } finally {
+      setBusy(false);
     }
   };
 
@@ -530,7 +752,7 @@ export default function App() {
    * one showing the last thing it knew.
    */
   useEffect(() => {
-    if (!showConsole) return;
+    if (view !== "console") return;
     let current = true;
     const read = () => {
       if (!current) return;
@@ -542,7 +764,19 @@ export default function App() {
       current = false;
       window.clearInterval(timer);
     };
-  }, [showConsole, refreshConsole]);
+  }, [view, refreshConsole]);
+
+  /**
+   * The document listing is re-read on every user switch as well as on open:
+   * the same endpoint answers differently for a different human, which is the
+   * whole demonstration.
+   */
+  useEffect(() => {
+    if (view !== "documents") return;
+    void refreshDocs().catch((reason) =>
+      setError(reason instanceof Error ? reason.message : String(reason)),
+    );
+  }, [view, actingUser, refreshDocs]);
 
   const createAgent = async (event: React.FormEvent) => {
     event.preventDefault();
@@ -795,10 +1029,26 @@ export default function App() {
 
         <button
           className={"button button-ghost console-toggle"}
-          onClick={() => setShowConsole((value) => !value)}
-          aria-pressed={showConsole}
+          onClick={() =>
+            setView((current) =>
+              current === "console" ? "playground" : "console",
+            )
+          }
+          aria-pressed={view === "console"}
         >
-          {showConsole ? "Back to the Playground" : "Operator Console"}
+          {view === "console" ? "Back to the Playground" : "Operator Console"}
+        </button>
+
+        <button
+          className={"button button-ghost console-toggle"}
+          onClick={() =>
+            setView((current) =>
+              current === "documents" ? "playground" : "documents",
+            )
+          }
+          aria-pressed={view === "documents"}
+        >
+          {view === "documents" ? "Back to the Playground" : "Documents"}
         </button>
 
         <div className="sidebar-label">
@@ -876,7 +1126,7 @@ export default function App() {
           </div>
         )}
 
-        {showConsole ? (
+        {view === "console" ? (
           <OperatorConsole
             audit={operatorData.audit}
             sessions={operatorData.sessions}
@@ -885,6 +1135,16 @@ export default function App() {
             ownerName={ownerName}
             onAssignRole={(id, role) => void assignRole(id, role)}
             onRevoke={(agentId) => void revokeSessions(agentId)}
+          />
+        ) : view === "documents" ? (
+          <DocumentsPanel
+            docs={docs}
+            actingUserName={ownerName(actingUser)}
+            ownerName={ownerName}
+            form={docForm}
+            onFormChange={setDocForm}
+            onUpload={(event) => void uploadDocument(event)}
+            busy={busy}
           />
         ) : selected ? (
           <>

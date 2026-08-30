@@ -59,13 +59,34 @@ export interface RunSessionClaims {
   revoked: boolean;
 }
 
+/** Who may read a document besides its owner. Mirrors the server's `Visibility`. */
+export type Visibility = "public" | "private";
+
+/** The visibilities an upload may choose. Mirrors `VISIBILITY_NAMES`. */
+export const VISIBILITY_NAMES: Visibility[] = ["public", "private"];
+
 /**
- * A document as ground truth — it exists, this human owns it. Mirrors the
- * server's `MockDocMetadata`; content is deliberately not part of the shape.
+ * A document as ground truth — it exists, this human owns it, and it is public
+ * or private. Mirrors the server's `MockDocMetadata`; content is deliberately
+ * not part of the shape.
  */
 export interface MockDocMetadata {
   id: string;
+  title: string;
   ownerId: string;
+  visibility: Visibility;
+}
+
+/**
+ * A document as its owner (or anybody, when it is public) may read it. The
+ * server decides which ones reach the browser; this shape only renders them.
+ */
+export interface MockDoc {
+  id: string;
+  ownerId: string;
+  title: string;
+  content: string;
+  visibility: Visibility;
 }
 
 export interface Agent {
