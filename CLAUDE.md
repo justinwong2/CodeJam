@@ -271,11 +271,16 @@ When adding an endpoint, update this table **and** the one in
    answer is `404 { error: "Document not found" }`, byte-identical to an unknown
    id, because such a document must be _invisible_ rather than merely denied —
    the audit row still carries the true ownership reason
-   ([ADR](docs/adr/2026-08-30-invisible-documents.md)).
+   ([ADR](docs/adr/2026-08-30-invisible-documents.md)). A `docs` path is one
+   segment: a suffix naming more is a `400` decided from the path's shape alone,
+   before any lookup, so it cannot vary with what exists or who owns it. What
+   the gateway records and forwards is the id it authorized, never the raw path.
 7. `search` is scoped rather than denied. The tool service filters the stored
    documents with the same `visibleTo` from `authz.ts` — imported, never copied
    — and refuses a call arriving without `x-launchpad-scope`, since the gateway
-   is its only caller and always decides one. The gateway never parses the
+   is its only caller and always decides one. The single-document route applies
+   the same predicate against the same header, so the direct-fetch path is
+   checked on both sides of the forward rather than only before it. The gateway never parses the
    response, so a filtered-out row leaves no decision of its own: the Operator
    Console's ground-truth table is what a scoped answer is read against.
 8. Whichever way it went, the decision is written to `audit: AuditRecord[]`
@@ -387,11 +392,15 @@ These are load-bearing. Breaking one costs hackathon points directly:
     reason. `gateway.test.ts` compares the two responses byte for byte and must
     keep doing so. Tool-RBAC denials stay `403`: they name a tool, not a
     resource.
-13. **`visibleTo()` exists exactly once**, in `authz.ts`, and both callers import
-    it — the gateway for a direct fetch, the mock tool service for a scoped
-    search. A second copy is how search starts returning rows the fetch path
-    hides. Scope travels in `x-launchpad-scope`, is attached only by the gateway
-    when forwarding, and a tool call missing it is refused.
+13. **`visibleTo()` exists exactly once**, in `authz.ts`, and every caller
+    imports it — the gateway for a direct fetch, and the mock tool service for
+    both a scoped search and the single-document route. A second copy is how
+    search starts returning rows the fetch path hides. Scope travels in
+    `x-launchpad-scope`, is attached only by the gateway when forwarding, and a
+    tool call missing it is refused — the document route included, which
+    re-derives the gateway's ownership answer rather than trusting it. The two
+    layers can only agree; the point is that the direct fetch is not one mistake
+    upstream away from serving somebody else's document.
 
 ## Security And Data Handling
 

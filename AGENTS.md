@@ -43,8 +43,10 @@ Summary — canonical list is in [CLAUDE.md](CLAUDE.md#invariants-to-preserve).
     _invisible_, so the answer is the same `404` a nonexistent id gets while the
     audit row carries the true ownership reason.
 11. Visibility is decided by one predicate, `visibleTo()` in `authz.ts`, imported
-    by the gateway (direct fetch) and the mock tool service (search Scope). Never
-    a second copy: a drifting copy is how search leaks what a fetch hides.
+    by the gateway (direct fetch) and the mock tool service (search Scope _and_
+    the single-document route, which re-derives the gateway's answer instead of
+    trusting it). Never a second copy: a drifting copy is how search leaks what a
+    fetch hides.
 12. Every gateway decision leaves exactly one redacted audit record, written
     before the answer is sent. No request or response body is persisted.
 
@@ -117,7 +119,9 @@ ownership denial is the exception: it answers `404 { error: "Document not
 found" }`, byte-identical to an unknown id, and files the real reason. Search is
 scoped rather than denied — the gateway sends the principal's owner id in
 `x-launchpad-scope`, and the tool service filters with the same `visibleTo` and
-refuses a call that carries no scope. Forwarding targets the mock tool service at
+refuses a call that carries no scope — on the document route as well as on
+search. A `docs` suffix naming more than one segment is a `400`, and the id the
+gateway authorized is what it records and forwards. Forwarding targets the mock tool service at
 `/internal/tools/*`, which accepts only calls carrying
 `GATEWAY_TOOL_CREDENTIAL` — the credential is what makes skipping the gateway a
 refusal rather than a shortcut.

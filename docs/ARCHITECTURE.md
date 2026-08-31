@@ -102,6 +102,17 @@ carrying no scope — the gateway is its only caller and always decides one. The
 gateway never parses the response bytes, so it never learns which rows were
 excluded.
 
+The single-document route applies that same predicate against that same header,
+so a direct fetch is checked on both sides of the forward. The gateway has
+already resolved ownership by then and the two can only agree — which is the
+point of doing it twice: the path that serves one document by id is not left one
+mistake upstream away from serving somebody else's. The service answers a
+document outside the scope exactly as it answers an unknown id, so the second
+layer is not an existence oracle of its own. A `docs` suffix naming more than one
+path segment is refused `400` on the shape of the path alone, before any lookup,
+and what the gateway records and forwards is the id it authorized rather than the
+raw path it was handed.
+
 Whichever route was taken and whichever way it went, the gateway files exactly
 one record through `AuditLog` in `apps/server/src/audit.ts` **before** it
 answers: a forward is an `allow`, any refusal that reached a decision is a
