@@ -68,6 +68,16 @@ export function buildEngineEnvironment(runJwt?: string): NodeJS.ProcessEnv {
     "LANG",
     "LC_ALL",
     "XDG_RUNTIME_DIR",
+    // Proxy and CA-trust variables, matching the host runner's allowlist: the
+    // engine itself needs them to reach a registry or the host behind a
+    // corporate proxy or custom CA — Podman especially, which pulls images
+    // in-process. None of them carries a secret.
+    "SSL_CERT_FILE",
+    "SSL_CERT_DIR",
+    "HTTP_PROXY",
+    "HTTPS_PROXY",
+    "NO_PROXY",
+    "NODE_EXTRA_CA_CERTS",
   ] as const) {
     if (process.env[name] !== undefined) environment[name] = process.env[name];
   }

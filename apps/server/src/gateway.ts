@@ -43,6 +43,16 @@ export function gatewayBaseUrl(host: string, port: number): string {
 // limit is far too small for this scope.
 const GATEWAY_BODY_LIMIT = 33_554_432;
 
+// The single declaration of which tools' authority is scoped to a resource.
+// Membership means two things that must travel together: the gateway looks the
+// named resource up and asks `can()` about its ownership, and an ownership
+// denial is answered as absence — the same 404 an unknown id gets — rather
+// than as a refusal (docs/adr/2026-08-30-invisible-documents.md). Declared
+// once because the pair drifting apart is an existence oracle: a tool that
+// gained the lookup without the invisibility would confirm, by the shape of
+// its denial, that the thing it denied exists.
+const RESOURCE_SCOPED_TOOLS: ReadonlySet<ProxyableTool> = new Set(["docs"]);
+
 const HOP_BY_HOP_HEADERS = [
   "connection",
   "keep-alive",
@@ -287,6 +297,14 @@ async function proxyResponses(
     );
   }
 
+  // Charged the moment the check passes, with no await between the two: the
+  // check and the charge are one atomic step on the event loop, so a second
+  // call from the same owner arriving while this one's record is being written
+  // sees this call's estimate already counted. Charging after the write would
+  // open a window in which any number of concurrent calls pass the same
+  // ceiling together, each certain it was the last one that fit.
+  chargeRun(principal.runId, principal.ownerId, estimated, now);
+
   // Recorded before the call is made, not after it returns. What is being
   // recorded is the gateway's decision to allow it, which is already final —
   // and evidence written afterwards would go missing exactly when the forward
@@ -297,14 +315,20 @@ async function proxyResponses(
   // spend climbing toward a refusal instead of a refusal arriving from nowhere.
   // It is still one record for one decision: the count is a property of the
   // decision, not a second row about it.
-  await audit.record({
-    identity: principal,
-    tool: "model",
-    resource: null,
-    decision: "allow",
-    reason: `${decision.reason}; ${budget.reason}`,
-  });
-  chargeRun(principal.runId, principal.ownerId, estimated, now);
+  try {
+    await audit.record({
+      identity: principal,
+      tool: "model",
+      resource: null,
+      decision: "allow",
+      reason: `${decision.reason}; ${budget.reason}`,
+    });
+  } catch (error) {
+    // The stopped call spent nothing, so it must be charged nothing: the
+    // estimate comes back off the meter before the failure propagates.
+    unchargeRun(principal.runId, estimated);
+    throw error;
+  }
 
   let upstream: Response;
   try {
@@ -316,6 +340,9 @@ async function proxyResponses(
   } catch {
     // The failure detail can carry request context; keep it out of the reply.
     request.log.error("Gateway could not reach the upstream model API");
+    // Nothing reached the upstream, so nothing was spent. Leaving the estimate
+    // counted would let an outage eat the owner's allowance in phantom tokens.
+    unchargeRun(principal.runId, estimated);
     return reply.code(502).send({ error: "Upstream model request failed" });
   }
 
@@ -426,6 +453,20 @@ function chargeRun(
 }
 
 /**
+ * Takes a charge back off its Run's meter, for a call that was charged and
+ * then never forwarded — an audit write that stopped it, or an upstream that
+ * could not be reached. Only what this call added is subtracted, so the Run's
+ * other calls keep counting; a meter drained to nothing is dropped rather than
+ * left standing empty, and a meter already pruned has nothing to give back.
+ */
+function unchargeRun(runId: string, estimated: number): void {
+  const meter = runMeters.get(runId);
+  if (!meter) return;
+  meter.tokens -= estimated;
+  if (meter.tokens <= 0) runMeters.delete(runId);
+}
+
+/**
  * What this owner's live Runs have spent so far, as the gateway estimated it.
  *
  * A read for the operator's benefit, not part of any decision — the ceiling
@@ -528,8 +569,22 @@ function resolveResource(
   tool: ProxyableTool,
   suffix: string,
 ): ResourceResolution {
-  if (tool !== "docs") return { ok: true, suffix };
   const segments = suffix.split("/").filter((segment) => segment.length > 0);
+  if (!RESOURCE_SCOPED_TOOLS.has(tool)) {
+    // These tools name no resource, so a sub-path names nothing they could be
+    // asked about — and the tool service registers them as exact routes, so
+    // forwarding one would file an allow for a call the service then refuses.
+    // Refused on the shape of the path alone, like the multi-segment case
+    // below, so the answer cannot vary with anything that exists.
+    if (segments.length > 0) {
+      return {
+        ok: false,
+        status: 400,
+        error: `The ${tool} tool takes no sub-path`,
+      };
+    }
+    return { ok: true, suffix };
+  }
   if (segments.length === 0) {
     return { ok: false, status: 400, error: "A document id is required" };
   }
@@ -675,11 +730,11 @@ async function proxyTool(
   if (target.resource) {
     const ownershipDecision = can(principal, tool, target.resource);
     if (!ownershipDecision.allow) {
-      // A document the principal may not read is *invisible*, not merely
+      // A resource-scoped tool's ownership denial is *invisible*, not merely
       // refused: the agent gets the same answer a nonexistent id gets, and the
       // record gets the reason. Every other tool's denial names a tool rather
       // than a resource, so it discloses nothing and stays a 403.
-      return tool === "docs"
+      return RESOURCE_SCOPED_TOOLS.has(tool)
         ? invisible(
             audit,
             request,
@@ -821,22 +876,54 @@ async function forwardToTool(
   return reply.send(downstream.rawPayload);
 }
 
-async function pump(
+/**
+ * Hands upstream chunks to the client as they arrive, respecting the sink's
+ * backpressure. Exported for its tests; the model proxy is its only caller.
+ *
+ * A client that disconnects mid-stream destroys the sink with no error, which
+ * announces itself as `close` — an event neither a parked drain wait nor a
+ * pending upstream read hears on its own. The close handler turns it into
+ * both: aborting the signal settles the drain wait, and cancelling the reader
+ * resolves any pending read as done. Either way the upstream body is released
+ * in `finally`, so a vanished listener cannot leave the pump holding the Ark
+ * connection open for as long as the model keeps talking.
+ */
+export async function pump(
   source: ReadableStream<Uint8Array>,
   sink: PassThrough,
 ): Promise<void> {
   const reader = source.getReader();
+  const disconnected = new AbortController();
+  const onSinkClose = () => {
+    disconnected.abort();
+    void reader.cancel().catch(() => {});
+  };
+  sink.once("close", onSinkClose);
   try {
     for (;;) {
       const next = await reader.read();
       if (next.done) break;
       if (!next.value) continue;
-      if (!sink.write(Buffer.from(next.value))) await once(sink, "drain");
+      // A write to a destroyed sink would raise an error nobody is listening
+      // for; a chunk that raced the disconnect is simply dropped instead.
+      if (sink.destroyed) break;
+      if (!sink.write(Buffer.from(next.value))) {
+        try {
+          await once(sink, "drain", { signal: disconnected.signal });
+        } catch {
+          // The client went away while we waited: nothing left to drain to.
+          break;
+        }
+      }
     }
-    sink.end();
+    if (!sink.destroyed) sink.end();
   } catch (error) {
     sink.destroy(error instanceof Error ? error : new Error(String(error)));
   } finally {
+    sink.off("close", onSinkClose);
+    // Released on every path — done, failed, or abandoned. Cancelling a
+    // stream that already ended is a no-op, so the happy path pays nothing.
+    await reader.cancel().catch(() => {});
     reader.releaseLock();
   }
 }

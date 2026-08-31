@@ -1,7 +1,6 @@
 import cors from "@fastify/cors";
 import fastifyStatic from "@fastify/static";
 import Fastify, { type FastifyInstance, type FastifyRequest } from "fastify";
-import { timingSafeEqual } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { z } from "zod";
 import type { AppConfig } from "./config.js";
@@ -12,6 +11,7 @@ import {
   registerGateway,
 } from "./gateway.js";
 import { registerMockTools } from "./mock-tools.js";
+import { credentialMatches } from "./timing-safe.js";
 import {
   DEFAULT_OWNER_ID,
   ROLE_NAMES,
@@ -170,12 +170,7 @@ export async function createApp(
     }
     const header = request.headers.authorization ?? "";
     const candidate = header.startsWith("Bearer ") ? header.slice(7) : "";
-    const expectedBuffer = Buffer.from(config.authToken);
-    const candidateBuffer = Buffer.from(candidate);
-    const valid =
-      candidateBuffer.length === expectedBuffer.length &&
-      timingSafeEqual(candidateBuffer, expectedBuffer);
-    if (!valid) {
+    if (!credentialMatches(candidate, config.authToken)) {
       return reply.code(401).send({ error: "Authentication required" });
     }
   });
@@ -376,6 +371,23 @@ export async function createApp(
 }
 
 /**
+ * A rejected body's `error` field is rendered verbatim by the web UI, so it has
+ * to be a sentence a person can act on — Zod's own message is the stringified
+ * issues array. The first few issues become "path: message" lines; the full
+ * structured list still travels in `details` for any consumer that parses it.
+ */
+function summarizeValidationIssues(issues: z.ZodError["issues"]): string {
+  return issues
+    .slice(0, 3)
+    .map((issue) =>
+      issue.path.length > 0
+        ? issue.path.map(String).join(".") + ": " + issue.message
+        : issue.message,
+    )
+    .join("; ");
+}
+
+/**
  * Installed before any route is registered: an encapsulated plugin captures the
  * error handler in force when it boots, so a handler set afterwards would leave
  * the gateway and tool scopes on Fastify's default — which answers a rejected
@@ -401,7 +413,9 @@ function setErrorHandler(app: FastifyInstance): void {
       request.log.error(appError);
     }
     return reply.code(statusCode).send({
-      error: appError.message,
+      error: validationError
+        ? summarizeValidationIssues(error.issues)
+        : appError.message,
       ...(validationError ? { details: error.issues } : {}),
     });
   });

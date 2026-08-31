@@ -150,6 +150,22 @@ describe("JsonStore migration", () => {
     expect(reopened.snapshot().audit).toEqual([record]);
   });
 
+  it("refuses a corrupt database file with a diagnostic naming it", async () => {
+    // The path is whatever the platform resolved for the temp directory, so it
+    // is asserted as built rather than hardcoded (see the platform note in
+    // CLAUDE.md); a raw SyntaxError would tell the operator neither which file
+    // is corrupt nor why the server refused to start.
+    const filePath = await temporaryFile();
+    const garbage = "{ this is not json";
+    await writeFile(filePath, garbage, "utf8");
+
+    const store = new JsonStore(filePath);
+    await expect(store.initialize()).rejects.toThrow(filePath);
+    await expect(store.initialize()).rejects.toThrow(/not valid JSON/);
+    // Refused, never repaired: the contents stay exactly as they were found.
+    expect(await readFile(filePath, "utf8")).toBe(garbage);
+  });
+
   it("refuses a database written by a newer server rather than truncating it", async () => {
     const filePath = await temporaryFile();
     await writeFile(

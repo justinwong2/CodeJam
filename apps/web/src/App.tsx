@@ -323,6 +323,16 @@ function OperatorConsole({
                     defaultValue={user.tokenBudget}
                     key={user.id + ":" + String(user.tokenBudget)}
                     onBlur={(event) => {
+                      // An emptied field is an abandoned edit, not a request
+                      // for "unlimited" — Number("") is 0, and 0 removes the
+                      // ceiling. Unlimited stays an explicit 0; here we change
+                      // nothing and repaint the ceiling that still stands,
+                      // since the uncontrolled input would otherwise keep
+                      // showing blank over an unchanged budget.
+                      if (event.target.value.trim() === "") {
+                        event.target.value = String(user.tokenBudget);
+                        return;
+                      }
                       const next = Number(event.target.value);
                       if (!Number.isInteger(next) || next < 0) return;
                       if (next === user.tokenBudget) return;
@@ -695,6 +705,13 @@ export default function App() {
   const actingUserRef = useRef(actingUser);
   const mountedRef = useRef(true);
   const pollingRunIds = useRef(new Set<string>());
+  // Whether `form` holds settings-panel edits the user has not saved yet.
+  // A ref rather than state on purpose: only the sync effect below reads it,
+  // and marking a keystroke dirty should not itself schedule a render.
+  const formDirtyRef = useRef(false);
+  // Which Agent the form was last loaded from, so switching Agents always
+  // reloads the form even when unsaved edits would otherwise be kept.
+  const formAgentIdRef = useRef<string | null>(null);
   selectedIdRef.current = selectedId;
   actingUserRef.current = actingUser;
 
@@ -940,15 +957,27 @@ export default function App() {
       );
   }, [refreshMessages, selectedId]);
 
+  /**
+   * Sync the form from the server's copy of the selected Agent — but never
+   * over unsaved edits. `selected` is rebuilt on every refresh, including the
+   * one `pollRun` fires the moment a Run goes terminal, so keying this off
+   * object identity alone would silently discard a tool-grant toggle made
+   * mid-Run before "Apply tool grants" was clicked. Switching Agents always
+   * reloads, because the form must show the Agent it now belongs to; a mere
+   * refresh reloads only when the form holds nothing the user typed.
+   */
   useEffect(() => {
-    if (selected) {
-      setForm({
-        name: selected.name,
-        description: selected.description,
-        instructions: selected.instructions,
-        toolGrants: selected.toolGrants,
-      });
-    }
+    if (!selected) return;
+    const switchedAgent = formAgentIdRef.current !== selected.id;
+    if (!switchedAgent && formDirtyRef.current) return;
+    formAgentIdRef.current = selected.id;
+    formDirtyRef.current = false;
+    setForm({
+      name: selected.name,
+      description: selected.description,
+      instructions: selected.instructions,
+      toolGrants: selected.toolGrants,
+    });
   }, [selected]);
 
   useEffect(() => {
@@ -1023,6 +1052,7 @@ export default function App() {
       setSelectedId(agent.id);
       setShowCreate(false);
       setForm(emptyForm);
+      formDirtyRef.current = false;
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : String(reason));
     } finally {
@@ -1037,6 +1067,8 @@ export default function App() {
     setError(null);
     try {
       await api.updateAgent(selected.id, form);
+      // The edits are saved, so the refresh below may sync them back freely.
+      formDirtyRef.current = false;
       await refreshAgents();
       setShowSettings(false);
     } catch (reason) {
@@ -1052,6 +1084,15 @@ export default function App() {
     setError(null);
     try {
       await api.updateAgent(selected.id, { toolGrants: form.toolGrants });
+      // Applied grants are no longer unsaved edits. Identity or instruction
+      // changes typed but not saved stay dirty, so the refresh keeps them.
+      if (
+        form.name === selected.name &&
+        form.description === selected.description &&
+        form.instructions === selected.instructions
+      ) {
+        formDirtyRef.current = false;
+      }
       await refreshAgents();
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : String(reason));
@@ -1269,7 +1310,10 @@ export default function App() {
         <button
           className="button button-primary create-button"
           onClick={() => {
+            // An intentional reset: whatever settings edits were pending are
+            // abandoned in favor of a blank create form.
             setForm(emptyForm);
+            formDirtyRef.current = false;
             setShowCreate(true);
           }}
         >
@@ -1453,9 +1497,10 @@ export default function App() {
                     Name
                     <input
                       value={form.name}
-                      onChange={(event) =>
-                        setForm({ ...form, name: event.target.value })
-                      }
+                      onChange={(event) => {
+                        formDirtyRef.current = true;
+                        setForm({ ...form, name: event.target.value });
+                      }}
                       required
                       maxLength={80}
                       disabled={selected.status === "busy"}
@@ -1465,9 +1510,10 @@ export default function App() {
                     Description
                     <input
                       value={form.description}
-                      onChange={(event) =>
-                        setForm({ ...form, description: event.target.value })
-                      }
+                      onChange={(event) => {
+                        formDirtyRef.current = true;
+                        setForm({ ...form, description: event.target.value });
+                      }}
                       maxLength={500}
                       disabled={selected.status === "busy"}
                     />
@@ -1477,9 +1523,10 @@ export default function App() {
                   System instructions
                   <textarea
                     value={form.instructions}
-                    onChange={(event) =>
-                      setForm({ ...form, instructions: event.target.value })
-                    }
+                    onChange={(event) => {
+                      formDirtyRef.current = true;
+                      setForm({ ...form, instructions: event.target.value });
+                    }}
                     rows={5}
                     maxLength={10_000}
                     disabled={selected.status === "busy"}
@@ -1488,7 +1535,10 @@ export default function App() {
                 <ToolGrantEditor
                   value={form.toolGrants}
                   availableTools={availableToolsFor(selected.ownerId)}
-                  onChange={(toolGrants) => setForm({ ...form, toolGrants })}
+                  onChange={(toolGrants) => {
+                    formDirtyRef.current = true;
+                    setForm({ ...form, toolGrants });
+                  }}
                   disabled={busy}
                 />
                 <div className="panel-footer">
@@ -1687,6 +1737,7 @@ export default function App() {
               className="button button-primary"
               onClick={() => {
                 setForm(emptyForm);
+                formDirtyRef.current = false;
                 setShowCreate(true);
               }}
             >

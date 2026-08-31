@@ -55,7 +55,10 @@ Summary — canonical list is in [CLAUDE.md](CLAUDE.md#invariants-to-preserve).
     record is one line appended to the audit sidecar (`<db>.audit.jsonl`) rather
     than a rewrite of `db.json`, and it is awaited before the answer just as the
     old write was. `AUDIT_RETENTION_LIMIT` (default `1000`) bounds how long a
-    record is kept, never whether it is written.
+    record is kept, never whether it is written. The one carve-out: a refusal
+    the trail cannot truthfully attribute — an unverifiable credential, or a
+    tool path naming no `ToolName` — is still refused and pino-logged but files
+    no record, because a record must name a run and a tool to be filed.
 
 ## Repo Map
 

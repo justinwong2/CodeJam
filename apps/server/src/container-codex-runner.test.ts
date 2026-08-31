@@ -1,7 +1,7 @@
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { loadConfig } from "./config.js";
 import {
   buildContainerRunArgs,
@@ -115,6 +115,42 @@ describe("Container Codex runner", () => {
     // The engine holds the run's own credential, and only for a real run.
     expect(environment[RUN_JWT_ENV_KEY]).toBe("run-jwt-for-this-test");
     expect(buildEngineEnvironment()[RUN_JWT_ENV_KEY]).toBeUndefined();
+  });
+
+  it("forwards proxy and CA trust variables to the engine, and still no secret", () => {
+    // The host runner has always forwarded these; the engine needs the same
+    // ones to pull an image or reach the host behind a corporate proxy or
+    // custom CA. The secrets stay out, which is the allowlist's whole point.
+    vi.stubEnv("HTTPS_PROXY", "http://proxy.corp.example:8080");
+    vi.stubEnv("HTTP_PROXY", "http://proxy.corp.example:8080");
+    vi.stubEnv("NO_PROXY", "localhost,127.0.0.1");
+    vi.stubEnv("SSL_CERT_FILE", "/etc/ssl/corp-ca.pem");
+    vi.stubEnv("SSL_CERT_DIR", "/etc/ssl/certs");
+    vi.stubEnv("NODE_EXTRA_CA_CERTS", "/etc/ssl/extra-ca.pem");
+    vi.stubEnv("ARK_API_KEY", "secret-that-must-not-reach-the-engine");
+    vi.stubEnv("GATEWAY_JWT_SECRET", "secret-that-must-not-reach-the-engine");
+    vi.stubEnv(
+      "GATEWAY_TOOL_CREDENTIAL",
+      "secret-that-must-not-reach-the-engine",
+    );
+    try {
+      const environment = buildEngineEnvironment();
+      expect(environment.HTTPS_PROXY).toBe("http://proxy.corp.example:8080");
+      expect(environment.HTTP_PROXY).toBe("http://proxy.corp.example:8080");
+      expect(environment.NO_PROXY).toBe("localhost,127.0.0.1");
+      expect(environment.SSL_CERT_FILE).toBe("/etc/ssl/corp-ca.pem");
+      expect(environment.SSL_CERT_DIR).toBe("/etc/ssl/certs");
+      expect(environment.NODE_EXTRA_CA_CERTS).toBe("/etc/ssl/extra-ca.pem");
+
+      expect(environment.ARK_API_KEY).toBeUndefined();
+      expect(environment.GATEWAY_JWT_SECRET).toBeUndefined();
+      expect(environment.GATEWAY_TOOL_CREDENTIAL).toBeUndefined();
+      expect(Object.values(environment)).not.toContain(
+        "secret-that-must-not-reach-the-engine",
+      );
+    } finally {
+      vi.unstubAllEnvs();
+    }
   });
 
   it("leaves the host-gateway shim off Podman, which supplies its own alias", () => {

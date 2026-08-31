@@ -169,6 +169,28 @@ describe("HTTP boundary", () => {
     expect(oversized.statusCode).toBe(413);
     await app.close();
   });
+
+  it("answers a validation failure with a readable sentence, not the issues blob", async () => {
+    const { app } = await appWithStore();
+    const response = await app.inject({
+      method: "POST",
+      url: "/api/agents",
+      payload: { name: "   " },
+    });
+
+    expect(response.statusCode).toBe(400);
+    const body = response.json() as { error: string; details: unknown[] };
+    // The web UI renders `error` verbatim, so it must be one short human
+    // sentence naming the field — never Zod's stringified issues array.
+    expect(body.error).toContain("name");
+    expect(body.error).not.toContain("[");
+    expect(body.error).not.toContain("{");
+    expect(body.error.length).toBeLessThan(200);
+    // The structured issues still travel beside it, for consumers that parse.
+    expect(Array.isArray(body.details)).toBe(true);
+    expect(body.details.length).toBeGreaterThan(0);
+    await app.close();
+  });
 });
 
 describe("Agent delegated tools API", () => {

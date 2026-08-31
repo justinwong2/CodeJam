@@ -1,8 +1,9 @@
-import { randomUUID, timingSafeEqual } from "node:crypto";
+import { randomUUID } from "node:crypto";
 import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 import { visibleTo } from "./authz.js";
 import type { AppConfig } from "./config.js";
+import { credentialMatches } from "./timing-safe.js";
 import type { MockDoc } from "./types.js";
 
 // The downstream services an agent can be given access to. They stand in for
@@ -73,16 +74,6 @@ const paymentBody = z.object({
 });
 
 const docParams = z.object({ docId: z.string().trim().min(1).max(80) });
-
-/** Constant-time compare that tolerates a length mismatch without throwing. */
-function credentialMatches(provided: string, expected: string): boolean {
-  const providedBuffer = Buffer.from(provided);
-  const expectedBuffer = Buffer.from(expected);
-  return (
-    providedBuffer.length === expectedBuffer.length &&
-    timingSafeEqual(providedBuffer, expectedBuffer)
-  );
-}
 
 export async function registerMockTools(
   app: FastifyInstance,

@@ -4,16 +4,23 @@ import { createServer, type IncomingMessage, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { PassThrough } from "node:stream";
 import { afterEach, describe, expect, it } from "vitest";
 import { AgentService } from "./agent-service.js";
 import { createApp } from "./app.js";
 import { loadConfig } from "./config.js";
-import { clearOwnerMeters, resetRunMeters } from "./gateway.js";
+import {
+  clearOwnerMeters,
+  ownerSpendInFlight,
+  pump,
+  resetRunMeters,
+} from "./gateway.js";
 import { signRunJwt, type RunJwtClaims } from "./run-jwt.js";
 import { JsonStore } from "./store.js";
 import type {
   Agent,
   AuditRecord,
+  GatewayDirectory,
   Role,
   RunnerRequest,
   RunnerResult,
@@ -742,6 +749,76 @@ describe("Model gateway token budget", () => {
     expect((await callModel(app, session, 4_000)).statusCode).toBe(200);
 
     expect(upstream.calls).toHaveLength(3);
+    await app.close();
+  });
+
+  it("holds two concurrent calls to one ceiling, not one ceiling each", async () => {
+    // The race a synchronous charge closes: the allow record's awaited write
+    // is a real event-loop yield, so a gateway that charged only after it
+    // would let both of these pass the same ceiling before either counted.
+    const upstream = await startEchoUpstream();
+    const session = liveSession();
+    const service = serviceWith(session);
+    // Widen the yield so the second call reliably arrives inside it — this is
+    // the window the old ordering left open on every call, made assertable.
+    const writable = service as unknown as {
+      appendAuditRecord: (record: AuditRecord) => Promise<void>;
+    };
+    writable.appendAuditRecord = async (record) => {
+      await new Promise((resolve) => setTimeout(resolve, 25));
+      stubAudit.push(record);
+    };
+    const app = await createApp(configFor(upstream.baseUrl), service);
+    // Room for one ~1,000-token call, nowhere near two.
+    stubBudgets.set("user-a", 1_500);
+
+    const [first, second] = await Promise.all([
+      callModel(app, session, 4_000),
+      callModel(app, session, 4_000),
+    ]);
+
+    // Exactly one fit, whichever it was: the other saw its estimate already
+    // counted and was refused without Ark ever hearing about it.
+    expect([first.statusCode, second.statusCode].sort()).toEqual([200, 402]);
+    expect(upstream.calls).toHaveLength(1);
+    expect(stubAudit.map((record) => record.decision).sort()).toEqual([
+      "allow",
+      "deny",
+    ]);
+    await app.close();
+  });
+
+  it("gives an unreachable upstream's charge back, so an outage bills nothing", async () => {
+    // Grab a port the OS just released so the connection is refused.
+    const placeholder = createServer();
+    await new Promise<void>((resolve) =>
+      placeholder.listen(0, "127.0.0.1", () => resolve()),
+    );
+    const { port } = placeholder.address() as AddressInfo;
+    await new Promise<void>((resolve) => placeholder.close(() => resolve()));
+
+    const session = liveSession();
+    const service = serviceWith(session);
+    const config = configFor(`http://127.0.0.1:${port}`);
+    const app = await createApp(config, service);
+    // Room for one call's estimate at a time, never for two at once.
+    stubBudgets.set("user-a", 1_500);
+
+    const first = await callModel(app, session, 4_000);
+    expect(first.statusCode).toBe(502);
+    // The estimate came back off the meter with the failure: no tokens were
+    // spent, so none may stand against the owner.
+    expect(
+      ownerSpendInFlight(
+        service as unknown as GatewayDirectory,
+        "user-a",
+        config.sessionTtlMs,
+      ),
+    ).toBe(0);
+    // And the ceiling still admits a whole call: refused by the outage, never
+    // by a phantom charge — a 402 here would mean the 502 had been billed.
+    const second = await callModel(app, session, 4_000);
+    expect(second.statusCode).toBe(502);
     await app.close();
   });
 
@@ -1621,6 +1698,33 @@ describe("Tool gateway", () => {
     ]);
   });
 
+  it("refuses a sub-path on a tool that takes none, before the tool is called", async () => {
+    // `search` and `payments` are exact routes downstream: forwarding a suffix
+    // would file an allow for a call the tool service then answers 404 — a
+    // trail claiming a forward that did nothing. Refused on the shape of the
+    // path alone instead, the same way a multi-segment document path is.
+    const fixture = await toolFixture();
+    const runJwt = await fixture.runAs("user-a");
+
+    const search = await callTool(fixture.app, runJwt, "search/extra");
+    expect(search.statusCode).toBe(400);
+    expect((search.json() as { error: string }).error).toContain(
+      "takes no sub-path",
+    );
+    const payment = await callTool(fixture.app, runJwt, "payments/checkout");
+    expect(payment.statusCode).toBe(400);
+
+    // Nothing was forwarded, and nothing was allowed: one denial per call,
+    // named for the path that was refused.
+    expect(fixture.toolCalls).toEqual([]);
+    const records = fixture.audit(fixture.runIds[0] ?? "");
+    expect(records).toMatchObject([
+      { tool: "search", resource: "search/extra", decision: "deny" },
+      { tool: "payments", resource: "payments/checkout", decision: "deny" },
+    ]);
+    expect(records.every((record) => record.decision === "deny")).toBe(true);
+  });
+
   it("records and forwards the document it authorized, not the path it was given", async () => {
     // A trailing slash is the same document; the record and the forwarded path
     // both name what `can()` actually decided about.
@@ -2059,5 +2163,40 @@ describe("Mid-run revocation", () => {
     });
     expect(response.statusCode).toBe(404);
     await app.close();
+  });
+});
+
+describe("Gateway stream pump", () => {
+  it("settles a parked drain wait and releases the upstream when the client goes away", async () => {
+    // Fastify destroys the sink when the client connection closes, and a
+    // destroy with no error announces itself as 'close', never 'error'. A pump
+    // waiting only for 'drain' would park forever on a reader it never lets
+    // go, holding the Ark connection open for a listener that is gone.
+    let cancelled = false;
+    const source = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        controller.enqueue(new Uint8Array(65_536));
+      },
+      cancel() {
+        cancelled = true;
+      },
+    });
+    // A sink nobody reads, with almost no room: the first write overflows it
+    // and the pump goes into its drain wait.
+    const sink = new PassThrough({ highWaterMark: 16 });
+
+    const pumping = pump(source, sink);
+    // Let the pump reach the drain wait before the client vanishes.
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    sink.destroy();
+
+    const settled = await Promise.race([
+      pumping.then(() => true),
+      new Promise<boolean>((resolve) =>
+        setTimeout(() => resolve(false), 2_000),
+      ),
+    ]);
+    expect(settled).toBe(true);
+    expect(cancelled).toBe(true);
   });
 });

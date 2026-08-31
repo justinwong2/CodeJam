@@ -455,7 +455,13 @@ These are load-bearing. Breaking one costs hackathon points directly:
     the answer.** `AuditLog` is the only writer, identity comes from stored
     ownership rather than from a credential's claims, and no request or
     response body is persisted — a document's content must never reach an audit
-    field. `audit.test.ts` and `gateway.test.ts` assert the redaction and the
+    field. The one carve-out is a refusal the trail cannot truthfully attribute:
+    a credential that verifies against no known `RunSession`, or a tool path
+    naming nothing that is a `ToolName` — the latter even when the identity is
+    fully resolved. An unverifiable credential's claims are not evidence of an
+    identity, and a record must name a run and a tool to be filed; such calls
+    are still refused and still appear in the pino request log, they just file
+    no evidence. `audit.test.ts` and `gateway.test.ts` assert the redaction and the
     one-record-per-decision rule and must keep doing so. Retention bounds how
     long a record is **kept**, never whether it is **written**: the append to
     the audit sidecar is awaited before the answer exactly as the whole-database

@@ -329,7 +329,21 @@ export class JsonStore {
       await this.persist();
       return;
     }
-    this.data = migrateDatabase(JSON.parse(raw));
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(raw);
+    } catch {
+      // A corrupt primary database is refused, never repaired or overwritten:
+      // starting over it would silently discard every Agent and Run it held.
+      // The diagnostic names the file so the operator knows what to inspect,
+      // and the contents stay exactly as they were found.
+      throw new Error(
+        "Database file " +
+          this.filePath +
+          " is not valid JSON; refusing to start over a corrupt store",
+      );
+    }
+    this.data = migrateDatabase(parsed);
     // A database written before the sidecar existed still carries its audit
     // array. Those records are older than anything the sidecar can hold, so
     // they go in front of it and the combined list is rewritten in one atomic

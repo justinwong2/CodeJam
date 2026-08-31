@@ -224,15 +224,17 @@ export class AgentService implements GatewayDirectory {
   }
 
   listAgents(): Agent[] {
+    // `select` clones what the selector returns, so sorting the copy out here
+    // costs the Agents alone rather than the whole database a `snapshot` would.
     return this.store
-      .snapshot()
-      .agents.sort((left, right) =>
-        right.updatedAt.localeCompare(left.updatedAt),
-      );
+      .select((database) => database.agents)
+      .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt));
   }
 
   getAgent(id: string): Agent {
-    const agent = this.store.snapshot().agents.find((item) => item.id === id);
+    const agent = this.store.select((database) =>
+      database.agents.find((item) => item.id === id),
+    );
     if (!agent) {
       throw new HttpError(404, "Agent not found");
     }
@@ -266,7 +268,9 @@ export class AgentService implements GatewayDirectory {
     };
     await this.workspaces.create(agent);
     await this.store.mutate((database) => database.agents.push(agent));
-    return agent;
+    // A copy, as `updateAgent` returns: the caller must never hold the object
+    // the store now owns, or a later edit to it would bypass `mutate`.
+    return structuredClone(agent);
   }
 
   async updateAgent(id: string, input: UpdateAgentInput): Promise<Agent> {
@@ -340,13 +344,18 @@ export class AgentService implements GatewayDirectory {
   getMessages(agentId: string): Message[] {
     this.getAgent(agentId);
     return this.store
-      .snapshot()
-      .messages.filter((message) => message.agentId === agentId)
+      .select((database) =>
+        database.messages.filter((message) => message.agentId === agentId),
+      )
       .sort((left, right) => left.createdAt.localeCompare(right.createdAt));
   }
 
   getRun(runId: string): AgentRun {
-    const run = this.store.snapshot().runs.find((item) => item.id === runId);
+    // The UI polls this on a sub-second tick, which is why it must not pay for
+    // a clone of every stored message and audit record to answer one Run.
+    const run = this.store.select((database) =>
+      database.runs.find((item) => item.id === runId),
+    );
     if (!run) {
       throw new HttpError(404, "Run not found");
     }
@@ -356,8 +365,9 @@ export class AgentService implements GatewayDirectory {
   getRuns(agentId: string): AgentRun[] {
     this.getAgent(agentId);
     return this.store
-      .snapshot()
-      .runs.filter((run) => run.agentId === agentId)
+      .select((database) =>
+        database.runs.filter((run) => run.agentId === agentId),
+      )
       .sort((left, right) => right.createdAt.localeCompare(left.createdAt));
   }
 
@@ -438,7 +448,9 @@ export class AgentService implements GatewayDirectory {
       agentId,
       ownerId: agentAtStart.ownerId,
       runId,
-      exp: Math.floor(expiresAtMs / 1_000),
+      // Rounded up: the token must never expire before the session it mirrors,
+      // so the gateway's session check stays the earlier, canonical bound.
+      exp: Math.ceil(expiresAtMs / 1_000),
     });
     const execution = this.executeRun(agentAtStart, run, runJwt);
     this.activeExecutions.set(agentId, execution);
@@ -521,7 +533,9 @@ export class AgentService implements GatewayDirectory {
     await this.store.mutate((database) => {
       database.docs.push(doc);
     });
-    return doc;
+    // A copy, for the same reason `createAgent` returns one: the pushed object
+    // now belongs to the store, and no caller may reach it around `mutate`.
+    return structuredClone(doc);
   }
 
   /**

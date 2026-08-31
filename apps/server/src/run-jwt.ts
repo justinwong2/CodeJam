@@ -1,4 +1,5 @@
-import { createHmac, timingSafeEqual } from "node:crypto";
+import { createHmac } from "node:crypto";
+import { credentialMatches } from "./timing-safe.js";
 
 // A hand-rolled HS256 JWT. One signing algorithm, five claims, and no
 // negotiation: a dependency would add drift-control cost far out of proportion
@@ -94,14 +95,13 @@ export function verifyRunJwt(
     return { valid: false, reason: "Unsupported run credential algorithm" };
   }
 
-  const expected = Buffer.from(
-    signature(secret, encodedHeader + "." + encodedClaims),
-    "utf8",
-  );
-  const provided = Buffer.from(providedSignature, "utf8");
+  // Both sides are computed base64url strings, so the shared constant-time
+  // string compare applies as-is.
   if (
-    provided.length !== expected.length ||
-    !timingSafeEqual(provided, expected)
+    !credentialMatches(
+      providedSignature,
+      signature(secret, encodedHeader + "." + encodedClaims),
+    )
   ) {
     return { valid: false, reason: "Run credential signature is not valid" };
   }

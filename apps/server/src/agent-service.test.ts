@@ -176,6 +176,13 @@ describe("Run sessions", () => {
     expect(Date.parse(session?.expiresAt ?? "")).toBeGreaterThan(Date.now());
     expect(service.listRunSessions(agent.id)).toHaveLength(1);
 
+    // The token's expiry is rounded up, never down: a floor would let the
+    // token deny a call up to 999ms before the session — the canonical,
+    // earlier bound — had actually expired.
+    expect(verified.claims.exp * 1_000).toBeGreaterThanOrEqual(
+      Date.parse(session?.expiresAt ?? ""),
+    );
+
     finish({ output: "done", threadId: "thread", usage: null });
     await expect.poll(() => service.getRun(run.id).status).toBe("completed");
   });
@@ -384,6 +391,19 @@ describe("Run sessions", () => {
 });
 
 describe("Agent lifecycle", () => {
+  it("returns a copy from createAgent rather than the store's own object", async () => {
+    const service = await makeService();
+    const created = await service.createAgent({ name: "Detached" });
+
+    // A caller editing what it was handed must be editing a copy: the stored
+    // Agent changes through `mutate` or not at all.
+    created.name = "mutated behind the store's back";
+    created.toolGrants = ["payments"];
+
+    expect(service.getAgent(created.id).name).toBe("Detached");
+    expect(service.getAgent(created.id).toolGrants).toBeNull();
+  });
+
   it("creates, updates, stops, starts and deletes an Agent", async () => {
     const service = await makeService();
     const agent = await service.createAgent({ name: "Builder" });
@@ -547,6 +567,28 @@ describe("Documents", () => {
 
     expect(doc.ownerId).toBe("user-b");
     expect(service.findMockDoc(doc.id)?.ownerId).toBe("user-b");
+  });
+
+  it("returns a copy from createDocument rather than the store's own object", async () => {
+    const service = await makeService();
+    const doc = await service.createDocument(
+      {
+        title: "Original",
+        content: "unchanged content",
+        visibility: "private",
+      },
+      "user-a",
+    );
+
+    // Same rule as createAgent: what the caller holds is not what the store
+    // keeps, so an edit here must change nothing anybody else reads.
+    doc.title = "mutated behind the store's back";
+    doc.visibility = "public";
+
+    expect(service.findMockDoc(doc.id)).toMatchObject({
+      title: "Original",
+      visibility: "private",
+    });
   });
 });
 
