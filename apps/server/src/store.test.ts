@@ -156,8 +156,20 @@ describe("Seeded users and ownership", () => {
     const store = new JsonStore(filePath);
     await store.initialize();
     expect(store.snapshot().users).toEqual([
-      { id: "user-a", name: "User A", role: "admin" },
-      { id: "user-b", name: "User B", role: "basic" },
+      {
+        id: "user-a",
+        name: "User A",
+        role: "admin",
+        tokenBudget: 5_000_000,
+        budgetResetAt: null,
+      },
+      {
+        id: "user-b",
+        name: "User B",
+        role: "basic",
+        tokenBudget: 5_000_000,
+        budgetResetAt: null,
+      },
     ]);
 
     // A restart reads the seeded rows back rather than seeding beside them.
@@ -183,10 +195,25 @@ describe("Seeded users and ownership", () => {
     const store = new JsonStore(filePath);
     await store.initialize();
 
-    // The missing seed is added; the stored one is left exactly as it was.
+    // The missing seed is added; the stored one is left exactly as it was —
+    // except for the budget it predates, which loads as unlimited. That is the
+    // safe direction here: a ceiling nobody set must not strand an existing
+    // demo's Agents, and `can()` has already decided whether a call may happen.
     expect(store.snapshot().users).toEqual([
-      { id: "user-b", name: "Renamed B", role: "basic" },
-      { id: "user-a", name: "User A", role: "admin" },
+      {
+        id: "user-b",
+        name: "Renamed B",
+        role: "basic",
+        tokenBudget: 0,
+        budgetResetAt: null,
+      },
+      {
+        id: "user-a",
+        name: "User A",
+        role: "admin",
+        tokenBudget: 5_000_000,
+        budgetResetAt: null,
+      },
     ]);
   });
 
