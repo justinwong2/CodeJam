@@ -9,7 +9,7 @@ import {
   parseCodexEventLine,
 } from "./codex-runner.js";
 import { loadConfig } from "./config.js";
-import { RUN_JWT_ENV_KEY } from "./gateway.js";
+import { GATEWAY_URL_ENV_KEY, RUN_JWT_ENV_KEY } from "./gateway.js";
 
 describe("Codex runner protocol", () => {
   it("builds a new-session invocation", () => {
@@ -116,6 +116,15 @@ describe("Local Codex runner credentials and config", () => {
     // Codex holds the run's own credential, and only for a real run.
     expect(environment[RUN_JWT_ENV_KEY]).toBe("run-jwt-for-this-test");
     expect(buildCodexEnvironment(config)[RUN_JWT_ENV_KEY]).toBeUndefined();
+    // The tool proxy's origin travels with it, over loopback for a host
+    // process. Unlike the credential it is present even without a run, since a
+    // URL confers nothing: every call it names is still authorized per call.
+    expect(environment[GATEWAY_URL_ENV_KEY]).toBe(
+      `http://127.0.0.1:${config.port}/gateway/v1`,
+    );
+    expect(buildCodexEnvironment(config)[GATEWAY_URL_ENV_KEY]).toBe(
+      `http://127.0.0.1:${config.port}/gateway/v1`,
+    );
   });
 
   it("points Codex at the loopback gateway", async () => {

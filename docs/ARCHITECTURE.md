@@ -170,6 +170,15 @@ on the caller's vantage point, the **active runner** — not startup — writes
 `config.toml`: `127.0.0.1` for the host process, `host.docker.internal` or
 `host.containers.internal` from inside a container.
 
+That file is a **model** endpoint and describes no tool route, so the runner
+also hands the Runtime the same origin as `LAUNCHPAD_GATEWAY_URL`. Without it
+`/gateway/v1/tools/*` is enforced but undiscoverable from inside the container,
+which makes a tool denial impossible to demonstrate end to end. It is a URL
+rather than a credential — the container runner passes it by value in argv,
+where `RUN_JWT` may never go — and it grants nothing, because `can()` still runs
+on every call it names. The Web UI's default Agent instructions reference both
+variables by name, so that text does not have to know which engine is running.
+
 ### AgentService
 
 Coordinates lifecycle state, persistence, workspaces, and Runs. One Agent can

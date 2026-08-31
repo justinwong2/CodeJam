@@ -9,7 +9,7 @@ import {
   containerName,
   ContainerCodexRunner,
 } from "./container-codex-runner.js";
-import { RUN_JWT_ENV_KEY } from "./gateway.js";
+import { GATEWAY_URL_ENV_KEY, RUN_JWT_ENV_KEY } from "./gateway.js";
 
 // loadConfig runs CODEX_HOME through path.resolve, so the mounted source path
 // is platform-dependent: "/tmp/codex-home" on POSIX, "C:\tmp\codex-home" on
@@ -150,6 +150,46 @@ describe("Container Codex runner", () => {
       );
     } finally {
       vi.unstubAllEnvs();
+    }
+  });
+
+  it("tells the Runtime where the tool proxy is, using the engine's own alias", () => {
+    // config.toml gives Codex the gateway as a *model* endpoint only, so
+    // without this variable the tool routes are enforced but undiscoverable
+    // and no tool denial can ever be demonstrated end to end. The alias must
+    // track the engine: a container reaches the host on a non-loopback
+    // interface, and a Podman Runtime handed Docker's alias resolves nothing.
+    for (const [engine, alias] of [
+      ["docker", "host.docker.internal"],
+      ["podman", "host.containers.internal"],
+    ] as const) {
+      const config = loadConfig({
+        NODE_ENV: "test",
+        GATEWAY_JWT_SECRET: "gateway-test-signing-secret",
+        ARK_API_KEY: "secret-that-must-not-appear-in-argv",
+        ARK_MODEL: "ep-test",
+        CODEX_HOME,
+        RUNTIME_PROVIDER: "container",
+        CONTAINER_ENGINE: engine,
+      });
+      const args = buildContainerRunArgs(
+        {
+          agentId: "agent",
+          workspacePath: "/tmp/workspace",
+          prompt: "hello",
+          threadId: null,
+          runJwt: "run-jwt-for-this-test",
+        },
+        config,
+      );
+
+      expect(args).toContain(
+        `${GATEWAY_URL_ENV_KEY}=http://${alias}:${config.port}/gateway/v1`,
+      );
+      // It travels by value rather than by name, which is only acceptable
+      // because it is a URL. No credential may follow it into argv.
+      expect(args).not.toContain("secret-that-must-not-appear-in-argv");
+      expect(args).not.toContain("run-jwt-for-this-test");
     }
   });
 

@@ -24,6 +24,7 @@ import type {
 import { ROLE_NAMES, VISIBILITY_NAMES } from "./types";
 
 const starterPrompts = [
+  "Fetch document doc-a1 through the gateway, then search for “gateway”, then try the payments tool. Report the status code and body of each.",
   "Create a small TypeScript CLI that prints a weather summary from sample JSON.",
   "Inspect this workspace and explain what you would improve first.",
   "Build a responsive single-page todo app with tests.",
@@ -36,11 +37,27 @@ interface AgentForm {
   toolGrants: ToolName[] | null;
 }
 
+// The default instructions describe the gateway's tool surface because nothing
+// else does: config.toml points Codex at the gateway as its *model* endpoint,
+// which tells it nothing about /gateway/v1/tools/*. Without this an Agent
+// cannot discover tools that are implemented and enforced. Both values are read
+// from the environment the runner supplies, so this text is engine-agnostic.
+const defaultInstructions = `Help me build and test software in this workspace. Keep changes small and explain the result.
+
+You can also reach platform tools through the Agent Access Gateway. Its base URL is in the LAUNCHPAD_GATEWAY_URL environment variable, and your credential is in RUN_JWT:
+
+  curl -sS -w '\\n%{http_code}\\n' -H "Authorization: Bearer $RUN_JWT" "$LAUNCHPAD_GATEWAY_URL/tools/docs/<id>"
+  curl -sS -w '\\n%{http_code}\\n' -H "Authorization: Bearer $RUN_JWT" "$LAUNCHPAD_GATEWAY_URL/tools/search?q=<query>"
+  curl -sS -w '\\n%{http_code}\\n' -H "Authorization: Bearer $RUN_JWT" "$LAUNCHPAD_GATEWAY_URL/tools/payments/<id>"
+
+Seeded document ids are doc-a1, doc-a2, doc-b1, kb-1, kb-2, kb-3.
+
+A 403 or 404 from the gateway is a real answer from the platform's authorization policy, not a fault to work around. Report the status code and body exactly as received, and do not retry with different credentials or a different route.`;
+
 const emptyForm: AgentForm = {
   name: "",
   description: "",
-  instructions:
-    "Help me build and test software in this workspace. Keep changes small and explain the result.",
+  instructions: defaultInstructions,
   toolGrants: null,
 };
 

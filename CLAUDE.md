@@ -298,7 +298,8 @@ When adding an endpoint, update this table **and** the one in
    state, mints the run's HS256 credential and its `RunSession` in the same
    write, and returns immediately — execution is **asynchronous**.
 3. The service invokes the configured `AgentRunner`, passing `runJwt`.
-4. The runner executes Codex with that credential in `RUN_JWT`. First turn uses
+4. The runner executes Codex with that credential in `RUN_JWT`, and the
+   gateway's own origin in `LAUNCHPAD_GATEWAY_URL`. First turn uses
    `codex exec`; later turns resume the stored Codex thread, which is what makes
    conversations continuous.
 5. Codex calls `POST /gateway/v1/responses` on this server — not Ark directly.
@@ -410,6 +411,18 @@ not server startup, because the gateway origin depends on the runner's vantage
 point — `http://127.0.0.1:<PORT>/gateway/v1` for the host process,
 `http://host.docker.internal:<PORT>/gateway/v1` (or `host.containers.internal`
 on Podman) from inside a container. `env_key` is `RUN_JWT`, never `ARK_API_KEY`.
+
+That file points Codex at the gateway as its **model** endpoint and says nothing
+about `/gateway/v1/tools/*`, so the same origin is also handed to the Runtime as
+`LAUNCHPAD_GATEWAY_URL` — otherwise the tool routes are enforced but
+undiscoverable from inside, and no tool denial can be demonstrated end to end.
+It is a URL, not a credential: the host runner passes it in the child
+environment, the container runner passes it by value in argv (where `RUN_JWT`
+may never go), and it confers nothing on its own, since every call it names is
+still authorized per call. The web app's default Agent instructions describe
+those routes and the seeded document ids by reading both variables by name,
+which is what keeps that text engine-agnostic.
+
 Because a container reaches the host on a non-loopback interface,
 `npm run poc` now binds `HOST=0.0.0.0` and generates an ephemeral
 `APP_AUTH_TOKEN` for the run when none is configured.

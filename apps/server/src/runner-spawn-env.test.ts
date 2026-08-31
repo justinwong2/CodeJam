@@ -8,7 +8,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { CodexRunner } from "./codex-runner.js";
 import { ContainerCodexRunner } from "./container-codex-runner.js";
 import { loadConfig } from "./config.js";
-import { RUN_JWT_ENV_KEY } from "./gateway.js";
+import { GATEWAY_URL_ENV_KEY, RUN_JWT_ENV_KEY } from "./gateway.js";
 import type { RunnerRequest } from "./types.js";
 
 vi.mock("node:child_process", async (importOriginal) => {
@@ -110,6 +110,9 @@ describe("Runner spawn environments", () => {
     // a stale or shared one would fail every gateway call at demo time while
     // a truthiness check stayed green.
     expect(environment[RUN_JWT_ENV_KEY]).toBe(request.runJwt);
+    expect(environment[GATEWAY_URL_ENV_KEY]).toBe(
+      `http://127.0.0.1:${config.port}/gateway/v1`,
+    );
   });
 
   it("spawns the container engine without the Ark key even when the server env holds it", async () => {
@@ -140,5 +143,11 @@ describe("Runner spawn environments", () => {
     // `--env RUN_JWT` forwards by name, so this value is what actually lands
     // inside the container: it must be this run's credential, not any token.
     expect(environment[RUN_JWT_ENV_KEY]).toBe(request.runJwt);
+    // The tool proxy's origin goes by value in argv instead, so assert it at
+    // the spawn call site too — the Runtime cannot discover the tool routes
+    // any other way.
+    expect(spawnMock.mock.calls[0]?.[1]).toContain(
+      `${GATEWAY_URL_ENV_KEY}=http://host.docker.internal:${config.port}/gateway/v1`,
+    );
   });
 });

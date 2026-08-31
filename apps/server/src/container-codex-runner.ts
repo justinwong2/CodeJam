@@ -3,7 +3,11 @@ import { promisify } from "node:util";
 import { writeCodexConfig, type AppConfig } from "./config.js";
 import { buildCodexArgs, parseCodexEventLine } from "./codex-runner.js";
 import { RunCancelledError } from "./errors.js";
-import { gatewayBaseUrl, RUN_JWT_ENV_KEY } from "./gateway.js";
+import {
+  gatewayBaseUrl,
+  GATEWAY_URL_ENV_KEY,
+  RUN_JWT_ENV_KEY,
+} from "./gateway.js";
 import type {
   AgentRunner,
   RunUsage,
@@ -126,6 +130,14 @@ export function buildContainerRunArgs(
     // so no credential is ever visible in argv.
     "--env",
     RUN_JWT_ENV_KEY,
+    // Passed by value, because it is a URL rather than a credential. The alias
+    // is the engine's, since the container reaches the host on a non-loopback
+    // interface — the same origin config.toml is written with.
+    "--env",
+    `${GATEWAY_URL_ENV_KEY}=${gatewayBaseUrl(
+      containerHostAlias(config.containerEngine),
+      config.port,
+    )}`,
     "--env",
     "CODEX_HOME=/codex-home",
     "--env",

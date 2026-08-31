@@ -3,7 +3,11 @@ import { spawn, type ChildProcess } from "node:child_process";
 import { promisify } from "node:util";
 import { writeCodexConfig, type AppConfig } from "./config.js";
 import { RunCancelledError } from "./errors.js";
-import { gatewayBaseUrl, RUN_JWT_ENV_KEY } from "./gateway.js";
+import {
+  gatewayBaseUrl,
+  GATEWAY_URL_ENV_KEY,
+  RUN_JWT_ENV_KEY,
+} from "./gateway.js";
 import type {
   AgentRunner,
   RunUsage,
@@ -121,6 +125,10 @@ export function buildCodexEnvironment(
   const environment: NodeJS.ProcessEnv = {
     CODEX_HOME: config.codexHome,
     ...(runJwt ? { [RUN_JWT_ENV_KEY]: runJwt } : {}),
+    // Loopback here, the engine's host alias in the container runner — the same
+    // origin each writes into config.toml. Unconditional: it is a URL, so a
+    // probe that carries it leaks nothing.
+    [GATEWAY_URL_ENV_KEY]: gatewayBaseUrl("127.0.0.1", config.port),
     NO_COLOR: "1",
   };
   for (const name of inheritedNames) {

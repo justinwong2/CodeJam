@@ -34,6 +34,14 @@ export const GATEWAY_PREFIX = "/gateway/v1";
 // upstream key.
 export const RUN_JWT_ENV_KEY = "RUN_JWT";
 
+// Where the agent reaches the tool proxy. Codex is handed the gateway as its
+// model endpoint through config.toml, which tells it nothing about
+// `/gateway/v1/tools/*` — so without this the tool surface exists and is
+// enforced but is undiscoverable from inside the Runtime. It is a URL, not a
+// credential: unlike RUN_JWT it may safely appear in argv, and it confers
+// nothing on its own, since every call it names is still authorized per call.
+export const GATEWAY_URL_ENV_KEY = "LAUNCHPAD_GATEWAY_URL";
+
 /** Where an agent on `host` reaches this server's gateway routes. */
 export function gatewayBaseUrl(host: string, port: number): string {
   return `http://${host}:${port}${GATEWAY_PREFIX}`;
