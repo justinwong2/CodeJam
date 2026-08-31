@@ -30,10 +30,14 @@ credentials, personal data, or exploit details in an issue.
   operator. `GATEWAY_JWT_SECRET` signs those credentials, never leaves the
   server process, and is required at startup.
 - Every agent call is authorized as well as authenticated — the model included.
-  The gateway resolves the acting human from the Agent's current owner in the
-  store — permissions are deliberately absent from the run credential — and
-  applies `can()` before forwarding, so a role or ownership denial is a `403`
-  and nothing downstream is reached. The `suspended` role grants no tools at
+  The gateway resolves the acting human's current role and the Agent's current
+  `toolGrants` from the store — permissions are deliberately absent from the
+  run credential — and applies `can()` before forwarding. Effective authority
+  is their intersection followed by resource visibility: Agent grants can
+  remove authority but cannot add what the owner role lacks. `null` inherits,
+  `[]` grants nothing, and malformed explicit stored grants fail closed to
+  nothing. A role, Agent-grant, or ownership denial is a `403` and nothing
+  downstream is reached. The `suspended` role grants no tools at
   all, so a suspended owner's Agents cannot call a tool or spend model tokens,
   while their run credentials stay signed, unexpired, and unrevoked: the
   credential is identity, never permission. The mock tool service accepts only
@@ -81,7 +85,8 @@ credentials, personal data, or exploit details in an issue.
   It changes what counts against the ceiling and nothing else: not the ceiling,
   not the role.
 - Operator actions are not audited. `PATCH /api/users/:id` (assign a role, set a
-  token budget, or reset spend) and `POST /api/agents/:id/revoke` leave no `AuditRecord`,
+  token budget, or reset spend), Agent tool-grant changes, and
+  `POST /api/agents/:id/revoke` leave no `AuditRecord`,
   because a record belongs to a Run and an operator action has none. Their effect is visible in the very
   next gateway decision, and in the Operator Console's session table, but there
   is no "who changed this role, and when". Accepted for POC scope; a real

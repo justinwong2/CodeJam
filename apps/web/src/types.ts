@@ -108,6 +108,8 @@ export interface MockDoc {
 export interface Agent {
   id: string;
   ownerId: string;
+  /** `null` inherits the owner role; an array can only narrow that role. */
+  toolGrants: ToolName[] | null;
   name: string;
   description: string;
   instructions: string;

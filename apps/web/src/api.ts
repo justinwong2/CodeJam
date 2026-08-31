@@ -9,6 +9,7 @@ import type {
   Role,
   RunSessionClaims,
   SystemInfo,
+  ToolName,
   User,
   Visibility,
 } from "./types";
@@ -92,12 +93,17 @@ async function request<T>(url: string, options?: RequestInit): Promise<T> {
 export const api = {
   auth: () => request<{ required: boolean }>("/api/auth"),
   system: () => request<SystemInfo>("/api/system"),
-  users: () => request<{ users: User[] }>("/api/users"),
+  users: () =>
+    request<{
+      users: User[];
+      delegatableToolsByRole: Record<Role, ToolName[]>;
+    }>("/api/users"),
   listAgents: () => request<{ agents: Agent[] }>("/api/agents"),
   createAgent: (body: {
     name: string;
     description: string;
     instructions: string;
+    toolGrants: ToolName[] | null;
   }) =>
     request<{ agent: Agent }>("/api/agents", {
       method: "POST",
@@ -105,7 +111,12 @@ export const api = {
     }),
   updateAgent: (
     id: string,
-    body: { name: string; description: string; instructions: string },
+    body: Partial<{
+      name: string;
+      description: string;
+      instructions: string;
+      toolGrants: ToolName[] | null;
+    }>,
   ) =>
     request<{ agent: Agent }>("/api/agents/" + id, {
       method: "PATCH",

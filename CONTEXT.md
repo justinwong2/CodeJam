@@ -20,6 +20,13 @@ _Avoid_: user (when the agent's acting identity is meant)
 The human a resource or Agent belongs to; the ownership key `can()` compares.
 _Avoid_: creator, author
 
+**Tool grant**:
+An Agent's delegated maximum tool set (`Agent.toolGrants`). `null` means inherit
+the Owner's role; an explicit list may only narrow that role, and `[]` grants
+nothing. The Gateway resolves it from the store per call, never from the JWT.
+_Avoid_: scope (reserved for document-search visibility), Agent role (roles
+belong to Owners), permission token
+
 **Document**:
 A small text resource in the mock tool service (`MockDoc`), owned by one user;
 the thing an ownership decision protects.
@@ -103,7 +110,9 @@ owner of a Document the principal cannot read.
 - A **Document** has exactly one **Owner**; **Visibility** never transfers
   ownership
 - The **Gateway** resolves a **Principal** per call from the Agent's current
-  **Owner** — every tool, the model included
+  **Owner** and current **Tool grant** — every tool, the model included
+- Effective authority is the Owner's role intersected with the Agent's Tool
+  grant; delegation narrows and never elevates
 - An ownership **Denial** on a Document is _invisible_ to the agent (404) but a
   true `deny` in the audit
 - A **Suspended** Owner's agents keep valid credentials and pass no `can()`

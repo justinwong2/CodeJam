@@ -473,3 +473,35 @@ since usage lands at completion. A Run whose usage never parsed counts as zero
 per-process, consistent with the single-process store. Tool calls are not
 budgeted: budget is about model token spend, and `payments` amounts are a mock.
 Budget changes are unaudited, exactly as role changes already are.
+
+### A8 — Per-Agent tool delegation narrows owner authority
+
+**Was:** every Agent inherited the complete tool set of its owner's live role.
+**Now:** `Agent.toolGrants` may narrow that set. `null` preserves inheritance;
+an explicit array is an Agent-specific ceiling, and `[]` grants nothing. The
+effective permission is:
+
+`owner role ∩ Agent tool grants ∩ resource visibility`, followed by the model
+budget where applicable.
+
+Both role and Agent grants are loaded from the store on every gateway call and
+are absent from the run credential. A grant-only `PATCH /api/agents/:id` is
+therefore allowed while a Run is busy and changes the next call made with the
+same JWT. Workspace identity/instruction edits remain blocked while busy.
+
+The owner role is evaluated first, so an explicit `payments` grant cannot
+elevate a basic owner and a suspended owner remains totally suspended. Agent
+grant denial is next and returns `403` before resource lookup or budget. Only
+after both tool ceilings allow does document visibility run; its invisible
+`404` behavior is unchanged. A model grant denial happens before budget and is
+charged nothing.
+
+Legacy Agents load `toolGrants: null` to keep their behavior. A malformed
+explicit stored value loads as `[]`, failing closed rather than converting
+corrupt policy into inheritance. Rationale and alternatives are recorded in
+[the delegation ADR](../adr/2026-08-31-agent-tool-delegation.md).
+
+The browser's grant choices are not a second hard-coded policy table.
+`GET /api/users` returns `delegatableToolsByRole` from server-side
+`ROLE_TOOLS`; Create and Settings render only the selected owner's list. This
+keeps `payments` absent for a basic owner while leaving enforcement at `can()`.

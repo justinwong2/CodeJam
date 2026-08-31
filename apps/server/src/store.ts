@@ -1,6 +1,6 @@
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import path from "node:path";
-import { DEFAULT_OWNER_ID } from "./types.js";
+import { DEFAULT_OWNER_ID, TOOL_NAMES } from "./types.js";
 import type {
   Agent,
   AgentRun,
@@ -9,6 +9,7 @@ import type {
   Message,
   MockDoc,
   RunSession,
+  ToolName,
   User,
 } from "./types.js";
 
@@ -178,6 +179,30 @@ function withOwners(agents: Agent[]): Agent[] {
 }
 
 /**
+ * Agents stored before delegation existed inherit their owner's role. An
+ * explicit malformed value fails closed to no grants; a loader must not turn
+ * corrupt policy into broader authority. Valid arrays are deduplicated.
+ */
+function withToolGrants(agents: Agent[]): Agent[] {
+  const known = new Set<string>(TOOL_NAMES);
+  return agents.map((agent) => {
+    const stored = (agent as Agent & { toolGrants?: unknown }).toolGrants;
+    if (!("toolGrants" in agent) || stored === null) {
+      return { ...agent, toolGrants: null };
+    }
+    if (
+      !Array.isArray(stored) ||
+      !stored.every((tool): tool is ToolName =>
+        typeof tool === "string" ? known.has(tool) : false,
+      )
+    ) {
+      return { ...agent, toolGrants: [] };
+    }
+    return { ...agent, toolGrants: [...new Set(stored)] };
+  });
+}
+
+/**
  * Tolerant loader. An older file keeps its rows and gains the collections it
  * predates, so a demo's Agents and conversations survive a schema change.
  * Later slices add their own collections through here without another bump.
@@ -197,7 +222,7 @@ export function migrateDatabase(parsed: unknown): Database {
   }
   return {
     version: DATABASE_VERSION,
-    agents: withOwners(collection<Agent>(source.agents)),
+    agents: withToolGrants(withOwners(collection<Agent>(source.agents))),
     messages: collection<Message>(source.messages),
     runs: collection<AgentRun>(source.runs),
     sessions: collection<RunSession>(source.sessions),

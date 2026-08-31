@@ -515,6 +515,7 @@ function resolvePrincipal(
       agentId: agent.id,
       runId: session.runId,
       role: owner.role,
+      toolGrants: agent.toolGrants,
     },
   };
 }

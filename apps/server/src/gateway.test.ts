@@ -47,6 +47,7 @@ const stubAudit: AuditRecord[] = [];
  * one, and a test can change it to make the same credential mean less.
  */
 const stubRoles = new Map<string, Role>();
+const stubAgentGrants = new Map<string, Agent["toolGrants"]>();
 
 /**
  * The ceiling and the settled spend the store would hold. Both default to the
@@ -66,6 +67,7 @@ const stubSettledRuns = new Set<string>();
 function serviceWith(...sessions: RunSession[]): AgentService {
   stubAudit.length = 0;
   stubRoles.clear();
+  stubAgentGrants.clear();
   stubBudgets.clear();
   stubSettledTokens.clear();
   stubSettledRuns.clear();
@@ -79,7 +81,13 @@ function serviceWith(...sessions: RunSession[]): AgentService {
     // assembled from these on every call, never from the credential's claims.
     findAgent: (id: string): Agent | undefined => {
       const session = sessions.find((item) => item.agentId === id);
-      return session ? ({ id, ownerId: session.ownerId } as Agent) : undefined;
+      return session
+        ? ({
+            id,
+            ownerId: session.ownerId,
+            toolGrants: stubAgentGrants.get(id) ?? null,
+          } as Agent)
+        : undefined;
     },
     findUser: (id: string): User | undefined => ({
       id,
@@ -550,6 +558,34 @@ describe("Model gateway token budget", () => {
       },
       payload: JSON.stringify({ model: "ep-test", input: "x".repeat(padding) }),
     });
+
+  it("checks the Agent grant before budget and charges a grant denial nothing", async () => {
+    const upstream = await startEchoUpstream();
+    const session = liveSession();
+    const app = await createApp(
+      configFor(upstream.baseUrl),
+      serviceWith(session),
+    );
+    stubBudgets.set("user-a", 1_100);
+    stubAgentGrants.set("agent-1", ["docs"]);
+
+    const denied = await callModel(app, session, 4_000);
+    expect(denied.statusCode).toBe(403);
+    expect((denied.json() as { error: string }).error).toContain(
+      "not delegated",
+    );
+
+    // The refused large call consumed no allowance. Once the model is granted,
+    // a small call still fits and is the only request Ark receives.
+    stubAgentGrants.set("agent-1", ["model"]);
+    expect((await callModel(app, session)).statusCode).toBe(200);
+    expect(upstream.calls).toHaveLength(1);
+    expect(stubAudit.map((record) => record.decision)).toEqual([
+      "deny",
+      "allow",
+    ]);
+    await app.close();
+  });
 
   it("forwards while the owner is under the ceiling, and says how much is left", async () => {
     const upstream = await startEchoUpstream();
@@ -1043,14 +1079,14 @@ describe("Tool gateway", () => {
    */
   const openFixtures: {
     app: FastifyInstance;
-    finish: () => void;
+    finish: () => Promise<void>;
   }[] = [];
 
   afterEach(async () => {
     while (openFixtures.length > 0) {
       const fixture = openFixtures.pop();
       if (!fixture) continue;
-      fixture.finish();
+      await fixture.finish();
       await fixture.app.close();
     }
     await closeOpenServers();
@@ -1072,10 +1108,17 @@ describe("Tool gateway", () => {
     runAs: (userId: string) => Promise<string>;
     /** The run ids `runAs` started, in the order it started them. */
     runIds: string[];
+    /** The Agent ids `runAs` created, in the same order. */
+    agentIds: string[];
     /** What the gateway persisted for a run, read back out of the store. */
     audit: (runId: string) => AuditRecord[];
     /** Rewrites a seeded human's role in the store, as an operator would. */
     setRole: (userId: string, role: Role) => Promise<void>;
+    /** Changes the Agent-specific ceiling while its run remains live. */
+    setToolGrants: (
+      agentId: string,
+      toolGrants: Agent["toolGrants"],
+    ) => Promise<void>;
   }
 
   async function toolFixture(): Promise<ToolFixture> {
@@ -1106,6 +1149,7 @@ describe("Tool gateway", () => {
 
     let agents = 0;
     const runIds: string[] = [];
+    const agentIds: string[] = [];
     const runAs = async (userId: string): Promise<string> => {
       const created = await app.inject({
         method: "POST",
@@ -1115,6 +1159,7 @@ describe("Tool gateway", () => {
       });
       expect(created.statusCode).toBe(201);
       const agentId = (created.json() as { agent: { id: string } }).agent.id;
+      agentIds.push(agentId);
       const started = await app.inject({
         method: "POST",
         url: `/api/agents/${agentId}/messages`,
@@ -1141,11 +1186,45 @@ describe("Tool gateway", () => {
       });
     };
 
+    const setToolGrants = async (
+      agentId: string,
+      toolGrants: Agent["toolGrants"],
+    ): Promise<void> => {
+      const response = await app.inject({
+        method: "PATCH",
+        url: `/api/agents/${agentId}`,
+        payload: { toolGrants },
+      });
+      expect(response.statusCode).toBe(200);
+    };
+
     openFixtures.push({
       app,
-      finish: () => release({ output: "done", threadId: null, usage: null }),
+      finish: async () => {
+        release({ output: "done", threadId: null, usage: null });
+        await expect
+          .poll(() =>
+            runIds.every((runId) =>
+              ["completed", "failed", "cancelled"].includes(
+                service.getRun(runId).status,
+              ),
+            ),
+          )
+          .toBe(true);
+      },
     });
-    return { app, service, toolCalls, upstream, runAs, runIds, audit, setRole };
+    return {
+      app,
+      service,
+      toolCalls,
+      upstream,
+      runAs,
+      runIds,
+      agentIds,
+      audit,
+      setRole,
+      setToolGrants,
+    };
   }
 
   const callTool = (app: FastifyInstance, runJwt: string, url: string) =>
@@ -1663,6 +1742,39 @@ describe("Tool gateway", () => {
         (record) => record.runId === runId && record.humanId === "user-b",
       ),
     ).toBe(true);
+  });
+
+  it("follows an Agent grant change mid-run on the same credential", async () => {
+    const fixture = await toolFixture();
+    const runJwt = await fixture.runAs("user-a");
+    const runId = fixture.runIds[0] ?? "";
+    const agentId = fixture.agentIds[0] ?? "";
+
+    expect((await callTool(fixture.app, runJwt, "payments")).statusCode).toBe(
+      201,
+    );
+    await fixture.setToolGrants(agentId, ["model", "docs", "search"]);
+
+    const denied = await callTool(fixture.app, runJwt, "payments");
+    expect(denied.statusCode).toBe(403);
+    expect((denied.json() as { error: string }).error).toContain(
+      "not delegated",
+    );
+    expect(fixture.toolCalls).toEqual(["/internal/tools/payments"]);
+
+    await fixture.setToolGrants(agentId, null);
+    expect((await callTool(fixture.app, runJwt, "payments")).statusCode).toBe(
+      201,
+    );
+    expect(fixture.toolCalls).toEqual([
+      "/internal/tools/payments",
+      "/internal/tools/payments",
+    ]);
+    expect(fixture.audit(runId).map((record) => record.decision)).toEqual([
+      "allow",
+      "deny",
+      "allow",
+    ]);
   });
 
   it("denies an Agent whose owner is no longer a known user", async () => {

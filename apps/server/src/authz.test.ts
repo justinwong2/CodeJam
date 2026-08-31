@@ -18,6 +18,7 @@ const principal = (role: Role): Principal => ({
   agentId: "agent-1",
   runId: "run-1",
   role,
+  toolGrants: null,
 });
 
 describe("can()", () => {
@@ -160,6 +161,31 @@ describe("can()", () => {
     expect(ownershipDenial.allow).toBe(false);
     expect(ownershipDenial.reason).toContain("user-a");
     expect(ownershipDenial.reason).toContain(basic.ownerId);
+  });
+
+  it("lets an Agent grant narrow its owner's role but never widen it", () => {
+    const narrowed = {
+      ...principal("admin"),
+      toolGrants: ["model", "docs"] as ToolName[],
+    };
+    expect(can(narrowed, "docs").allow).toBe(true);
+    const delegatedDenial = can(narrowed, "payments");
+    expect(delegatedDenial.allow).toBe(false);
+    expect(delegatedDenial.reason).toContain("not delegated");
+
+    const attemptedElevation = {
+      ...principal("basic"),
+      toolGrants: ["payments"] as ToolName[],
+    };
+    const roleDenial = can(attemptedElevation, "payments");
+    expect(roleDenial.allow).toBe(false);
+    expect(roleDenial.reason).toContain('Role "basic"');
+  });
+
+  it("treats an empty Agent grant as no tools, including no model", () => {
+    const decision = can({ ...principal("admin"), toolGrants: [] }, "model");
+    expect(decision.allow).toBe(false);
+    expect(decision.reason).toContain("not delegated");
   });
 
   it("checks the role before ownership, so a denial says what was wrong first", () => {

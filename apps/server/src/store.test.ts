@@ -55,6 +55,7 @@ describe("JsonStore migration", () => {
     expect(migrated.version).toBe(DATABASE_VERSION);
     expect(migrated.sessions).toEqual([]);
     expect(migrated.agents.map((agent) => agent.id)).toEqual(["agent-1"]);
+    expect(migrated.agents[0]?.toolGrants).toBeNull();
 
     // The upgrade is durable, not just in memory.
     const onDisk = JSON.parse(await readFile(filePath, "utf8")) as {
@@ -151,6 +152,43 @@ describe("JsonStore migration", () => {
 });
 
 describe("Seeded users and ownership", () => {
+  it("keeps valid Agent grants and fails malformed explicit grants closed", async () => {
+    const filePath = await temporaryFile();
+    await writeFile(
+      filePath,
+      JSON.stringify({
+        version: DATABASE_VERSION,
+        agents: [
+          {
+            ...legacyAgent,
+            id: "valid",
+            toolGrants: ["model", "docs", "model"],
+          },
+          { ...legacyAgent, id: "unknown", toolGrants: ["model", "shell"] },
+          { ...legacyAgent, id: "wrong-shape", toolGrants: "model" },
+        ],
+      }),
+      "utf8",
+    );
+
+    const store = new JsonStore(filePath);
+    await store.initialize();
+    expect(
+      store.snapshot().agents.map((agent) => [agent.id, agent.toolGrants]),
+    ).toEqual([
+      ["valid", ["model", "docs"]],
+      ["unknown", []],
+      ["wrong-shape", []],
+    ]);
+
+    const reopened = new JsonStore(filePath);
+    await reopened.initialize();
+    expect(reopened.snapshot().agents[0]?.toolGrants).toEqual([
+      "model",
+      "docs",
+    ]);
+  });
+
   it("seeds the demo users once, not once per start", async () => {
     const filePath = await temporaryFile();
     const store = new JsonStore(filePath);

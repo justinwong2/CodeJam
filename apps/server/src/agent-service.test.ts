@@ -371,6 +371,38 @@ describe("Agent lifecycle", () => {
     expect(service.listAgents()).toHaveLength(0);
   });
 
+  it("changes only delegated tools while busy and rejects workspace edits", async () => {
+    let finish!: (result: RunnerResult) => void;
+    const pending = new Promise<RunnerResult>((resolve) => {
+      finish = resolve;
+    });
+    const service = await makeService({
+      run: () => pending,
+      cancel: async () => false,
+      isAvailable: async () => true,
+    });
+    const agent = await service.createAgent({
+      name: "Delegated",
+      toolGrants: ["model", "docs"],
+    });
+    const { run } = await service.sendMessage(agent.id, "keep running");
+    await expect.poll(() => service.getAgent(agent.id).status).toBe("busy");
+
+    const updated = await service.updateAgent(agent.id, {
+      toolGrants: ["model"],
+    });
+    expect(updated.toolGrants).toEqual(["model"]);
+    await expect(
+      service.updateAgent(agent.id, {
+        name: "Cannot rename now",
+        toolGrants: null,
+      }),
+    ).rejects.toMatchObject({ statusCode: 409 });
+
+    finish({ output: "done", threadId: "thread", usage: null });
+    await expect.poll(() => service.getRun(run.id).status).toBe("completed");
+  });
+
   it("persists a playground conversation", async () => {
     const service = await makeService();
     const agent = await service.createAgent({ name: "Coder" });

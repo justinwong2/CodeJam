@@ -171,6 +171,65 @@ describe("HTTP boundary", () => {
   });
 });
 
+describe("Agent delegated tools API", () => {
+  it("defaults to inheriting the owner role and round-trips explicit grants", async () => {
+    const { app } = await appWithStore();
+    const inherited = await app.inject({
+      method: "POST",
+      url: "/api/agents",
+      payload: { name: "Inherited" },
+    });
+    expect(inherited.statusCode).toBe(201);
+    expect((inherited.json() as { agent: Agent }).agent.toolGrants).toBeNull();
+
+    const explicit = await app.inject({
+      method: "POST",
+      url: "/api/agents",
+      payload: { name: "Restricted", toolGrants: ["model", "docs"] },
+    });
+    expect(explicit.statusCode).toBe(201);
+    const agent = (explicit.json() as { agent: Agent }).agent;
+    expect(agent.toolGrants).toEqual(["model", "docs"]);
+
+    const emptied = await app.inject({
+      method: "PATCH",
+      url: `/api/agents/${agent.id}`,
+      payload: { toolGrants: [] },
+    });
+    expect(emptied.statusCode).toBe(200);
+    expect((emptied.json() as { agent: Agent }).agent.toolGrants).toEqual([]);
+
+    const reset = await app.inject({
+      method: "PATCH",
+      url: `/api/agents/${agent.id}`,
+      payload: { toolGrants: null },
+    });
+    expect((reset.json() as { agent: Agent }).agent.toolGrants).toBeNull();
+    await app.close();
+  });
+
+  it("rejects unknown and duplicate tool grants at the request boundary", async () => {
+    const { app } = await appWithStore();
+    for (const toolGrants of [
+      ["model", "shell"],
+      ["docs", "docs"],
+    ]) {
+      const response = await app.inject({
+        method: "POST",
+        url: "/api/agents",
+        payload: { name: "Invalid", toolGrants },
+      });
+      expect(response.statusCode).toBe(400);
+    }
+    expect(
+      (await app.inject({ method: "GET", url: "/api/agents" })).json(),
+    ).toEqual({
+      agents: [],
+    });
+    await app.close();
+  });
+});
+
 describe("Run audit trail", () => {
   /** A finished Run, so there is something for evidence to hang on. */
   async function runFor(
@@ -709,6 +768,11 @@ describe("Acting user", () => {
     const response = await app.inject({ method: "GET", url: "/api/users" });
     expect(response.statusCode).toBe(200);
     expect(JSON.parse(response.body)).toEqual({
+      delegatableToolsByRole: {
+        admin: ["model", "docs", "search", "payments"],
+        basic: ["model", "docs", "search"],
+        suspended: [],
+      },
       users: [
         {
           id: "user-a",

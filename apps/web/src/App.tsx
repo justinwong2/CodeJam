@@ -17,6 +17,7 @@ import type {
   Role,
   RunSessionClaims,
   SystemInfo,
+  ToolName,
   User,
   Visibility,
 } from "./types";
@@ -28,11 +29,19 @@ const starterPrompts = [
   "Build a responsive single-page todo app with tests.",
 ];
 
-const emptyForm = {
+interface AgentForm {
+  name: string;
+  description: string;
+  instructions: string;
+  toolGrants: ToolName[] | null;
+}
+
+const emptyForm: AgentForm = {
   name: "",
   description: "",
   instructions:
     "Help me build and test software in this workspace. Keep changes small and explain the result.",
+  toolGrants: null,
 };
 
 function formatTime(value: string): string {
@@ -87,6 +96,59 @@ function StatusPill({ status }: { status: Agent["status"] }) {
 
 function Spinner() {
   return <span className="spinner" aria-label="Loading" />;
+}
+
+function ToolGrantEditor({
+  value,
+  availableTools,
+  onChange,
+  disabled = false,
+}: {
+  value: ToolName[] | null;
+  availableTools: ToolName[];
+  onChange: (value: ToolName[] | null) => void;
+  disabled?: boolean;
+}) {
+  const inherited = value === null;
+  return (
+    <fieldset className="tool-grants" disabled={disabled}>
+      <legend>Delegated gateway tools</legend>
+      <label className="inherit-grants">
+        <input
+          type="checkbox"
+          checked={inherited}
+          onChange={(event) =>
+            onChange(event.target.checked ? null : [...availableTools])
+          }
+        />
+        Inherit the owner role
+      </label>
+      <div className="tool-grant-options">
+        {availableTools.map((tool) => (
+          <label key={tool}>
+            <input
+              type="checkbox"
+              checked={inherited || value.includes(tool)}
+              disabled={disabled || inherited}
+              onChange={(event) => {
+                const current = value ?? [];
+                onChange(
+                  event.target.checked
+                    ? [...current, tool]
+                    : current.filter((item) => item !== tool),
+                );
+              }}
+            />
+            {tool}
+          </label>
+        ))}
+      </div>
+      <small>
+        The owner&apos;s current role is always the ceiling. These grants can
+        restrict an Agent, never elevate it.
+      </small>
+    </fieldset>
+  );
 }
 
 const tokens = (value: number): string => value.toLocaleString("en-US");
@@ -577,6 +639,9 @@ export default function App() {
   const [messages, setMessages] = useState<Message[]>([]);
   const [system, setSystem] = useState<SystemInfo | null>(null);
   const [users, setUsers] = useState<User[]>([]);
+  const [delegatableToolsByRole, setDelegatableToolsByRole] = useState<
+    Partial<Record<Role, ToolName[]>>
+  >({});
   const [actingUser, setActingUser] = useState(getActingUserId);
   const [showCreate, setShowCreate] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
@@ -659,7 +724,10 @@ export default function App() {
     await Promise.all([
       refreshAgents(),
       api.system().then(setSystem),
-      api.users().then((result) => setUsers(result.users)),
+      api.users().then((result) => {
+        setUsers(result.users);
+        setDelegatableToolsByRole(result.delegatableToolsByRole);
+      }),
     ]);
   }, [refreshAgents]);
 
@@ -698,6 +766,7 @@ export default function App() {
       spend: spend.spend,
     });
     setUsers(people.users);
+    setDelegatableToolsByRole(people.delegatableToolsByRole);
   }, []);
 
   /**
@@ -798,6 +867,20 @@ export default function App() {
 
   const ownerRole = (ownerId: string) => usersById.get(ownerId)?.role ?? null;
 
+  /** Display choices come from the server's live role table, never a UI copy. */
+  const availableToolsFor = (ownerId: string): ToolName[] => {
+    const role = ownerRole(ownerId);
+    return role ? (delegatableToolsByRole[role] ?? []) : [];
+  };
+
+  const visibleToolGrants = (
+    value: ToolName[] | null,
+    ownerId: string,
+  ): ToolName[] | null =>
+    value === null
+      ? null
+      : value.filter((tool) => availableToolsFor(ownerId).includes(tool));
+
   // Only ever show evidence belonging to the Run on screen, so switching Runs
   // cannot leave one Run's decisions filed under another's name.
   const auditRecords =
@@ -849,6 +932,7 @@ export default function App() {
         name: selected.name,
         description: selected.description,
         instructions: selected.instructions,
+        toolGrants: selected.toolGrants,
       });
     }
   }, [selected]);
@@ -920,7 +1004,10 @@ export default function App() {
     setBusy(true);
     setError(null);
     try {
-      const { agent } = await api.createAgent(form);
+      const { agent } = await api.createAgent({
+        ...form,
+        toolGrants: visibleToolGrants(form.toolGrants, actingUser),
+      });
       await refreshAgents();
       setSelectedId(agent.id);
       setShowCreate(false);
@@ -938,9 +1025,28 @@ export default function App() {
     setBusy(true);
     setError(null);
     try {
-      await api.updateAgent(selected.id, form);
+      await api.updateAgent(selected.id, {
+        ...form,
+        toolGrants: visibleToolGrants(form.toolGrants, selected.ownerId),
+      });
       await refreshAgents();
       setShowSettings(false);
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : String(reason));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const saveAgentToolGrants = async () => {
+    if (!selected) return;
+    setBusy(true);
+    setError(null);
+    try {
+      await api.updateAgent(selected.id, {
+        toolGrants: visibleToolGrants(form.toolGrants, selected.ownerId),
+      });
+      await refreshAgents();
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : String(reason));
     } finally {
@@ -1304,7 +1410,7 @@ export default function App() {
                 <button
                   className="button button-ghost"
                   onClick={() => setShowSettings((value) => !value)}
-                  disabled={busy || selected.status === "busy"}
+                  disabled={busy}
                 >
                   Settings
                 </button>
@@ -1346,6 +1452,7 @@ export default function App() {
                       }
                       required
                       maxLength={80}
+                      disabled={selected.status === "busy"}
                     />
                   </label>
                   <label>
@@ -1356,6 +1463,7 @@ export default function App() {
                         setForm({ ...form, description: event.target.value })
                       }
                       maxLength={500}
+                      disabled={selected.status === "busy"}
                     />
                   </label>
                 </div>
@@ -1368,13 +1476,33 @@ export default function App() {
                     }
                     rows={5}
                     maxLength={10_000}
+                    disabled={selected.status === "busy"}
                   />
                 </label>
+                <ToolGrantEditor
+                  value={form.toolGrants}
+                  availableTools={availableToolsFor(selected.ownerId)}
+                  onChange={(toolGrants) => setForm({ ...form, toolGrants })}
+                  disabled={busy}
+                />
                 <div className="panel-footer">
                   <code>{selected.workspacePath}</code>
-                  <button className="button button-primary" disabled={busy}>
-                    {busy ? <Spinner /> : "Save changes"}
-                  </button>
+                  <div className="panel-actions">
+                    <button
+                      type="button"
+                      className="button button-ghost"
+                      onClick={() => void saveAgentToolGrants()}
+                      disabled={busy}
+                    >
+                      Apply tool grants
+                    </button>
+                    <button
+                      className="button button-primary"
+                      disabled={busy || selected.status === "busy"}
+                    >
+                      {busy ? <Spinner /> : "Save changes"}
+                    </button>
+                  </div>
                 </div>
               </form>
             )}
@@ -1620,11 +1748,18 @@ export default function App() {
                 maxLength={10_000}
               />
             </label>
+            <ToolGrantEditor
+              value={form.toolGrants}
+              availableTools={availableToolsFor(actingUser)}
+              onChange={(toolGrants) => setForm({ ...form, toolGrants })}
+              disabled={busy}
+            />
             <p className="owner-note">
               The server records this Agent as owned by{" "}
               <strong>{ownerName(actingUser)}</strong>
               {ownerRole(actingUser) ? " (" + ownerRole(actingUser) + ")" : ""}.
-              Its Runs get that owner&apos;s authority, and no more.
+              Its Runs get at most that owner&apos;s authority; delegated tools
+              may narrow it further.
             </p>
             <div className="modal-footer">
               <button

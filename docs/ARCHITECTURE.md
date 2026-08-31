@@ -67,14 +67,28 @@ stops an Agent's next call mid-run without reaching into a running container.
 wait for it.
 
 An authenticated call is then authorized. The gateway resolves a `Principal`
-from the Agent's **current owner** in the store — permissions are deliberately
-kept out of the credential, so a role change or a re-owned Agent takes effect on
-the next call rather than at expiry — and applies
+from the Agent's **current owner and current `toolGrants`** in the store —
+permissions are deliberately kept out of the credential, so a role, grant, or
+ownership change takes effect on the next call rather than at expiry — and applies
 `can(principal, tool, resource?)` from `apps/server/src/authz.ts`. The model is
 one of those tools: `POST /gateway/v1/responses` runs `can(principal, "model")`
 before it forwards, which is what makes the `suspended` role (an empty grant
 list) total rather than tool-only — a suspended owner's Agent cannot spend model
 tokens either.
+
+The role is the owner's maximum; the Agent grant can only narrow it. `null`
+inherits the role, an explicit array is the delegated ceiling, and `[]` grants
+nothing. `can()` evaluates owner role, then Agent grant, then resource
+visibility. This order prevents an explicit Agent grant from elevating a basic
+owner, preserves invisible-document handling only after `docs` itself is
+allowed, and keeps budget last. Grant-only Agent updates are accepted during a
+Run and are visible to the same credential on its next call.
+
+The browser does not mirror the role-to-tool table. `GET /api/users` returns
+`delegatableToolsByRole` from the server's `ROLE_TOOLS`, and Agent Settings
+renders only the selected owner's entry. This prevents a basic owner seeing
+`payments` as delegatable, while remaining presentation rather than
+enforcement: `can()` still reads and applies server policy on every call.
 
 An authorized model call is then checked against what its owner can afford.
 `withinBudget()` in `apps/server/src/budget.ts` — pure and synchronous like

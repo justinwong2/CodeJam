@@ -55,9 +55,8 @@ export const ROLE_TOOLS: Record<Role, ToolName[]> = {
 };
 
 /**
- * Who a gateway call is acting as. The human owner is the ownership key: an
- * Agent never has authority of its own, only the authority of the human it
- * runs for.
+ * Who a gateway call is acting as. The human owner is the ownership key and
+ * sets the maximum authority; the Agent's delegated grants may only narrow it.
  */
 export interface Principal {
   /** The acting human. */
@@ -68,11 +67,15 @@ export interface Principal {
   runId: string;
   /** Resolved server-side from the owner, not read from the credential. */
   role: Role;
+  /** Resolved server-side from the Agent on every call; `null` inherits role. */
+  toolGrants: ToolName[] | null;
 }
 
 export interface Agent {
   id: string;
   ownerId: string;
+  /** `null` inherits the owner's role; an array is an Agent-specific ceiling. */
+  toolGrants: ToolName[] | null;
   name: string;
   description: string;
   instructions: string;
@@ -243,12 +246,14 @@ export interface CreateAgentInput {
   name: string;
   description?: string | undefined;
   instructions?: string | undefined;
+  toolGrants?: ToolName[] | null | undefined;
 }
 
 export interface UpdateAgentInput {
   name?: string | undefined;
   description?: string | undefined;
   instructions?: string | undefined;
+  toolGrants?: ToolName[] | null | undefined;
 }
 
 /**

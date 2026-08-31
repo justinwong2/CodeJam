@@ -168,10 +168,18 @@ any client that is not this one.
   listing with the same `visibleTo` an Agent's search is scoped by) and names no
   owner (the server stamps the acting human). Switching the acting user re-reads
   the endpoint, which is the demonstration: one predicate, two callers.
+- **Agent tool grants.** Create and Settings expose inheritance plus the tools
+  the Agent's owner may actually delegate. Those choices come from
+  `/api/users`'s server-owned `delegatableToolsByRole`, never a hard-coded web
+  list, so a basic owner never sees `payments`. The browser only submits the
+  setting; the gateway decides. **Apply tool grants** remains usable during a
+  Run because policy changes are live, while identity and instruction edits
+  remain blocked until the Run ends.
 
 `apps/web/src/types.ts` mirrors the server's `User`, `Role`, `AuditRecord`,
 `RunSessionClaims`, `MockDocMetadata`, `MockDoc`, `Visibility`, and
-`Agent.ownerId`. The server's `types.ts` is canonical; keep the two in sync.
+`Agent.ownerId` / `Agent.toolGrants`. The server's `types.ts` is canonical;
+keep the two in sync.
 
 ## API Endpoints
 
@@ -183,7 +191,7 @@ All under `/api`. Auth is a single optional shared bearer token
 | GET    | `/api/health`              | Liveness probe                          |
 | GET    | `/api/auth`                | Whether a token is required             |
 | GET    | `/api/system`              | Runtime/engine diagnostics              |
-| GET    | `/api/users`               | Seeded users for the dev switcher       |
+| GET    | `/api/users`               | Users plus server-owned role tool lists |
 | GET    | `/api/docs`                | Documents the acting human may see      |
 | POST   | `/api/docs`                | Upload `{ title, content, visibility }` |
 | PATCH  | `/api/users/:id`           | Operator: role, budget, reset spend     |
@@ -192,9 +200,9 @@ All under `/api`. Auth is a single optional shared bearer token
 | GET    | `/api/operator/docs`       | Document metadata, never content        |
 | GET    | `/api/operator/spend`      | Per-human spend against the ceiling     |
 | GET    | `/api/agents`              | List Agents                             |
-| POST   | `/api/agents`              | Create an Agent                         |
+| POST   | `/api/agents`              | Create an Agent, optionally with grants |
 | GET    | `/api/agents/:id`          | Get one Agent                           |
-| PATCH  | `/api/agents/:id`          | Update an Agent                         |
+| PATCH  | `/api/agents/:id`          | Update config or live tool grants       |
 | DELETE | `/api/agents/:id`          | Delete; archives workspace              |
 | POST   | `/api/agents/:id/start`    | Lifecycle: start                        |
 | POST   | `/api/agents/:id/stop`     | Lifecycle: stop                         |
@@ -251,6 +259,13 @@ plain text, and a visibility fixed at creation. The id is generated server-side
 and the owner is the acting human — an `ownerId` in the body is a `400`, never a
 field that is honored. There is no edit, delete, or visibility toggle.
 
+`POST /api/agents` and `PATCH /api/agents/:id` accept `toolGrants` as `null`
+or a unique subset of `model`, `docs`, `search`, and `payments`. `null` means
+inherit the owner's role; `[]` means no gateway tools. This is a ceiling, never
+an elevation: the owner role must still grant a listed tool. A grant-only PATCH
+is allowed while the Agent is busy and takes effect on its next gateway call;
+a busy PATCH that also changes name, description, or instructions stays `409`.
+
 The Agent Access Gateway adds an **agent-facing** surface under `/gateway`.
 It is deliberately outside the `/api/*` auth hook: agents authenticate with
 their own run credential (`RUN_JWT`), not the browser's shared demo token.
@@ -283,16 +298,19 @@ When adding an endpoint, update this table **and** the one in
 5. Codex calls `POST /gateway/v1/responses` on this server — not Ark directly.
    The gateway verifies the credential against its `RunSession` (signature,
    expiry, `revoked`), resolves the `Principal` from the Agent's current owner
-   and runs `can(principal, "model")`, checks the owner's token budget, then
+   and current tool grants, runs `can(principal, "model")`, checks the owner's
+   token budget, then
    swaps the credential for the Ark key and streams the upstream reply back
-   unmodified. Anything unverifiable is a `401`, any role that does not grant
-   `model` is a `403`, and an owner with no allowance left is a `402` — none of
+   unmodified. Anything unverifiable is a `401`, any owner role or Agent grant
+   that excludes `model` is a `403`, and an owner with no allowance left is a
+   `402` — none of
    them with an upstream call, so neither a `suspended` owner's Agent nor a
    spent-out one can burn tokens. Codex may also write files and run commands in
    the Agent's workspace.
 6. A tool call goes to `/gateway/v1/tools/:tool/*` instead. The gateway verifies
    the same credential, then resolves the `Principal` from the Agent's **current
-   owner** in the store — permissions are never in the token — and runs
+   owner** and the Agent's **current tool grants** in the store — permissions
+   are never in the token — and runs
    `can(principal, tool, resource?)`, where a `docs` resource is the document's
    `{ ownerId, visibility }` and the rule is "owned OR public". Only on allow
    does it attach `GATEWAY_TOOL_CREDENTIAL` **and** the principal's owner id in
@@ -397,12 +415,15 @@ These are load-bearing. Breaking one costs hackathon points directly:
    revoked credential is a `401` and the upstream is never called.
    `gateway.test.ts` asserts both halves — the denial _and_ the absent upstream
    request — and must keep asserting both.
-10. **Authorization is decided server-side, per call, from stored ownership.**
+10. **Authorization is decided server-side, per call, from stored policy.**
     Permissions are never in the run credential: the gateway resolves the
-    principal from the Agent's current owner and calls `can()` on every call —
-    the model included — so a denial is a `403` with nothing forwarded. A role
-    change therefore lands on the next call rather than at token expiry, which
-    is what makes `suspended` total and the mid-run role flip real. The mock
+    principal from the Agent's current owner and current `toolGrants`, then
+    calls `can()` on every call — the model included. Effective authority is
+    `owner role ∩ Agent grants ∩ resource visibility`; an Agent can narrow but
+    never elevate its owner. Role and grant changes land on the next call
+    rather than at token expiry. `null` inherits the role, `[]` grants nothing,
+    and malformed explicit stored grants fail closed to `[]`. A denial is a
+    `403` with nothing forwarded. The mock
     tool service is reachable only with `GATEWAY_TOOL_CREDENTIAL`, which is what
     makes skipping the gateway a refusal rather than a shortcut.
 11. **Every gateway decision leaves exactly one redacted record, written before
@@ -448,6 +469,9 @@ These are load-bearing. Breaking one costs hackathon points directly:
   identifier, and the reason. Redaction happens inside `audit.ts` on the way to
   the store, so no call site can persist a record that skipped it. When you add
   a field to `AuditRecord`, run it through the same masking.
+- Agent grants are policy, not identity. They stay in the store, never the run
+  JWT, and are resolved together with the owner's live role on every call.
+  Unknown or malformed explicit stored grants fail closed to no tools.
 - The Ark key lives in the server process only. It is attached by the gateway
   when forwarding upstream and must never be copied into a runner environment,
   argv, a generated `config.toml`, or a log line — including the forwarded

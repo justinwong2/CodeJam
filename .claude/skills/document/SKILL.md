@@ -93,6 +93,11 @@ Apply the matching drift-control checklist:
   reviewer can run it, and tests including the failure case.
 - **Schema change** → keep both `types.ts` files in sync, update `CLAUDE.md`
   data flow, update store tests.
+- **Agent authorization-policy change** → update `CONTEXT.md` terminology,
+  `docs/ARCHITECTURE.md` check order, the gateway design's amendment log,
+  `SECURITY.md` failure behavior, and tests proving both denial and no forward.
+  Permissions stay out of run credentials; owner roles remain the ceiling over
+  per-Agent tool grants.
 - **Redaction/data handling** → `SECURITY.md`, `CLAUDE.md` security section,
   `AGENTS.md` checklist, redaction tests.
 

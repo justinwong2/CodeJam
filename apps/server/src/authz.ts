@@ -37,11 +37,9 @@ export interface AuthorizationDecision {
  * The single authorization entry point — pure and synchronous so it can be
  * exhaustively tested without a server, a store, or a clock.
  *
- * Allow iff the principal's role grants `tool` **and**, when a resource is
- * named, the principal may see it — owns it, or it is public. The role is
- * checked first so a denial names the coarser failure: a principal who may not
- * use a tool at all is denied for the tool, not for the ownership it also
- * lacks.
+ * Allow iff the owner's role grants `tool`, the Agent's delegated grants do
+ * not exclude it, and, when a resource is named, the principal may see it.
+ * Checks run broadest-to-narrowest: owner role, Agent grant, then visibility.
  *
  * A denial's reason is the truth about why, and stays the truth even where the
  * caller is deliberately told something blander: the gateway answers an
@@ -65,23 +63,33 @@ export function can(
       reason: `Role "${principal.role}" may not use the ${tool} tool`,
     };
   }
+  if (principal.toolGrants !== null && !principal.toolGrants.includes(tool)) {
+    return {
+      allow: false,
+      reason: `Agent ${principal.agentId} was not delegated the ${tool} tool`,
+    };
+  }
   if (resource && !visibleTo(resource, principal.ownerId)) {
     return {
       allow: false,
       reason: `${principal.ownerId} may not use the ${tool} tool on a resource owned by ${resource.ownerId}`,
     };
   }
+  const authorityReason =
+    principal.toolGrants === null
+      ? `Role "${principal.role}" grants the ${tool} tool; Agent inherits its owner's grants`
+      : `Role "${principal.role}" and Agent ${principal.agentId} grant the ${tool} tool`;
   if (!resource) {
     return {
       allow: true,
-      reason: `Role "${principal.role}" grants the ${tool} tool`,
+      reason: authorityReason,
     };
   }
   return {
     allow: true,
     reason:
       resource.ownerId === principal.ownerId
-        ? `Role "${principal.role}" grants the ${tool} tool and ${principal.ownerId} owns this resource`
-        : `Role "${principal.role}" grants the ${tool} tool and this resource is public`,
+        ? `${authorityReason}; ${principal.ownerId} owns this resource`
+        : `${authorityReason}; this resource is public`,
   };
 }

@@ -12,7 +12,13 @@ import {
   registerGateway,
 } from "./gateway.js";
 import { registerMockTools } from "./mock-tools.js";
-import { DEFAULT_OWNER_ID, ROLE_NAMES, VISIBILITY_NAMES } from "./types.js";
+import {
+  DEFAULT_OWNER_ID,
+  ROLE_NAMES,
+  ROLE_TOOLS,
+  TOOL_NAMES,
+  VISIBILITY_NAMES,
+} from "./types.js";
 import type { User } from "./types.js";
 import type { AgentService } from "./agent-service.js";
 
@@ -60,10 +66,17 @@ const updateUserBody = z
       body.resetSpend !== undefined,
     "Provide a role, a tokenBudget, resetSpend, or a combination",
   );
+const toolGrants = z
+  .array(z.enum(TOOL_NAMES))
+  .max(TOOL_NAMES.length)
+  .refine((tools) => new Set(tools).size === tools.length, {
+    message: "Tool grants must not contain duplicates",
+  });
 const createAgentBody = z.object({
   name: z.string().trim().min(1).max(80),
   description: z.string().max(500).optional(),
   instructions: z.string().max(10_000).optional(),
+  toolGrants: toolGrants.nullable().optional(),
 });
 const updateAgentBody = createAgentBody
   .partial()
@@ -196,7 +209,13 @@ export async function createApp(
 
   app.get("/api/system", async () => service.systemInfo());
 
-  app.get("/api/users", async () => ({ users: service.listUsers() }));
+  // The UI renders the server's real role table rather than maintaining a
+  // second hard-coded tool list. This is display data only; `can()` still
+  // resolves and enforces the same table independently on every Agent call.
+  app.get("/api/users", async () => ({
+    users: service.listUsers(),
+    delegatableToolsByRole: ROLE_TOOLS,
+  }));
 
   // The operator's other lever, beside revocation: change what a human may do
   // rather than cutting one run off. It takes effect on that human's Agents'

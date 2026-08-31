@@ -253,6 +253,7 @@ export class AgentService implements GatewayDirectory {
     const agent: Agent = {
       id,
       ownerId,
+      toolGrants: input.toolGrants == null ? null : [...input.toolGrants],
       name: input.name.trim(),
       description: input.description?.trim() ?? "",
       instructions: input.instructions?.trim() ?? "",
@@ -269,8 +270,12 @@ export class AgentService implements GatewayDirectory {
   }
 
   async updateAgent(id: string, input: UpdateAgentInput): Promise<Agent> {
+    const changesWorkspace =
+      input.name !== undefined ||
+      input.description !== undefined ||
+      input.instructions !== undefined;
     const current = this.getAgent(id);
-    if (current.status === "busy") {
+    if (current.status === "busy" && changesWorkspace) {
       throw new HttpError(409, "Stop the active run before editing this Agent");
     }
     const updated = await this.store.mutate((database) => {
@@ -278,7 +283,7 @@ export class AgentService implements GatewayDirectory {
       if (!agent) {
         throw new HttpError(404, "Agent not found");
       }
-      if (agent.status === "busy") {
+      if (agent.status === "busy" && changesWorkspace) {
         throw new HttpError(
           409,
           "Stop the active run before editing this Agent",
@@ -289,11 +294,15 @@ export class AgentService implements GatewayDirectory {
         agent.description = input.description.trim();
       if (input.instructions !== undefined)
         agent.instructions = input.instructions.trim();
+      if (input.toolGrants !== undefined) {
+        agent.toolGrants =
+          input.toolGrants === null ? null : [...input.toolGrants];
+      }
       agent.lastError = null;
       agent.updatedAt = now();
       return structuredClone(agent);
     });
-    await this.workspaces.writeInstructions(updated);
+    if (changesWorkspace) await this.workspaces.writeInstructions(updated);
     return updated;
   }
 
