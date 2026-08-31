@@ -29,4 +29,9 @@ regexes = [
   # point of that string is to assert the key never reaches argv, so it must
   # stay greppable.
   '''secret-that-must-not-appear-in-argv''',
+
+  # Synthetic JWT in apps/server/src/audit.test.ts. It decodes to a test-only
+  # session id with the literal signature "signature-here" and verifies that
+  # audit redaction catches token-shaped values not known from configuration.
+  '''eyJhbGciOiJIUzI1NiJ9\.eyJqdGkiOiJzZXNzaW9uLTEifQ\.c2lnbmF0dXJlLWhlcmU''',
 ]
