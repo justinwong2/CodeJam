@@ -319,16 +319,25 @@ When adding an endpoint, update this table **and** the one in
    answer is `404 { error: "Document not found" }`, byte-identical to an unknown
    id, because such a document must be _invisible_ rather than merely denied —
    the audit row still carries the true ownership reason
-   ([ADR](docs/adr/2026-08-30-invisible-documents.md)).
+   ([ADR](docs/adr/2026-08-30-invisible-documents.md)). A `docs` path is one
+   segment: a suffix naming more is a `400` decided from the path's shape alone,
+   before any lookup, so it cannot vary with what exists or who owns it. What
+   the gateway records and forwards is the id it authorized, never the raw path.
 7. `search` is scoped rather than denied. The tool service filters the stored
    documents with the same `visibleTo` from `authz.ts` — imported, never copied
    — and refuses a call arriving without `x-launchpad-scope`, since the gateway
-   is its only caller and always decides one. The gateway never parses the
+   is its only caller and always decides one. The single-document route applies
+   the same predicate against the same header, so the direct-fetch path is
+   checked on both sides of the forward rather than only before it. The gateway never parses the
    response, so a filtered-out row leaves no decision of its own: the Operator
    Console's ground-truth table is what a scoped answer is read against.
-8. Whichever way it went, the decision is written to `audit: AuditRecord[]`
-   through `AuditLog` **before** the answer is sent, so the store is never
-   behind what the agent has been told.
+8. Whichever way it went, the decision is written through `AuditLog` **before**
+   the answer is sent, so the store is never behind what the agent has been
+   told. On disk that write is one line appended to the audit sidecar
+   (`<db>.audit.jsonl`), not a rewrite of `db.json` — the busiest write in the
+   system costs one `appendFile` instead of the whole accumulated history. In
+   memory the same record lands in `audit: AuditRecord[]`, now a rolling window
+   of the newest `AUDIT_RETENTION_LIMIT` decisions.
 9. The runner returns a `RunnerResult`; the service persists the assistant
    message and terminal Run state, and expires the run's session.
 10. The UI polls `/api/runs/:id` until the Run reaches a terminal status, and
@@ -339,17 +348,18 @@ When adding an endpoint, update this table **and** the one in
 `.env` is gitignored. `.env.example` is the documented template and the README
 carries the summary table. Key variables:
 
-| Variable                  | Default           | Purpose                                   |
-| ------------------------- | ----------------- | ----------------------------------------- |
-| `ARK_API_KEY`             | required          | Ark model API key                         |
-| `ARK_MODEL`               | required          | Responses-capable endpoint ID (`ep-...`)  |
-| `APP_AUTH_TOKEN`          | empty             | Shared demo token; 24+ chars if remote    |
-| `GATEWAY_JWT_SECRET`      | required          | Signs per-run gateway credentials (16+)   |
-| `GATEWAY_TOOL_CREDENTIAL` | per-process       | Gateway → mock tool service; optional     |
-| `RUNTIME_PROVIDER`        | `local-process`   | `container` for disposable local Runtime  |
-| `CODEX_SANDBOX_MODE`      | `workspace-write` | Codex inner sandbox mode                  |
-| `CODEX_TIMEOUT_MS`        | `600000`          | Max duration of one turn                  |
-| `SESSION_TTL_MS`          | `660000`          | How long a run's gateway credential lives |
+| Variable                  | Default           | Purpose                                    |
+| ------------------------- | ----------------- | ------------------------------------------ |
+| `ARK_API_KEY`             | required          | Ark model API key                          |
+| `ARK_MODEL`               | required          | Responses-capable endpoint ID (`ep-...`)   |
+| `APP_AUTH_TOKEN`          | empty             | Shared demo token; 24+ chars if remote     |
+| `GATEWAY_JWT_SECRET`      | required          | Signs per-run gateway credentials (16+)    |
+| `GATEWAY_TOOL_CREDENTIAL` | per-process       | Gateway → mock tool service; optional      |
+| `RUNTIME_PROVIDER`        | `local-process`   | `container` for disposable local Runtime   |
+| `CODEX_SANDBOX_MODE`      | `workspace-write` | Codex inner sandbox mode                   |
+| `CODEX_TIMEOUT_MS`        | `600000`          | Max duration of one turn                   |
+| `SESSION_TTL_MS`          | `660000`          | How long a run's gateway credential lives  |
+| `AUDIT_RETENTION_LIMIT`   | `1000`            | Gateway decisions kept, newest first (10+) |
 
 `config.ts` runs every path through `path.resolve`. This is why tests must not
 hardcode POSIX paths — see the platform note under Testing.
@@ -361,6 +371,15 @@ lifetime is a security decision and should be shortenable without shortening
 what a turn may take. The default (`660000`) is exactly what the old
 `CODEX_TIMEOUT_MS + 60_000` coupling produced, so naming it changed nothing;
 values under a second, or values that are not numbers, fail at boot.
+
+`AUDIT_RETENTION_LIMIT` is how many gateway decisions the store keeps. Evidence
+is the busiest write in the system and the only unbounded one, so it gets a cap
+rather than a disk that fills: the newest `limit` records stay, the oldest are
+evicted first, and the sidecar is rewritten once it drifts far enough past the
+cap to be worth compacting. Retention governs how long a record is **kept**,
+never whether it is **written** — every decision is still recorded before the
+agent is answered. The floor is ten, because a bound so tight that a single
+run's decisions cannot fit is a retention policy that erases what it is for.
 
 `GATEWAY_JWT_SECRET` is the gateway's HS256 signing key for per-run
 credentials. It is **required**: `loadConfig` throws when it is missing, under
@@ -431,18 +450,26 @@ These are load-bearing. Breaking one costs hackathon points directly:
     ownership rather than from a credential's claims, and no request or
     response body is persisted — a document's content must never reach an audit
     field. `audit.test.ts` and `gateway.test.ts` assert the redaction and the
-    one-record-per-decision rule and must keep doing so.
+    one-record-per-decision rule and must keep doing so. Retention bounds how
+    long a record is **kept**, never whether it is **written**: the append to
+    the audit sidecar is awaited before the answer exactly as the whole-database
+    write it replaced was, and a failed append still rejects. `store.test.ts`
+    proves the append does not rewrite `db.json`.
 12. **A document nobody may read is invisible, not denied.** An ownership denial
     on `docs` answers the same `404 { error: "Document not found" }` — status and
     bytes — that an unknown id answers, while the audit row carries the true
     reason. `gateway.test.ts` compares the two responses byte for byte and must
     keep doing so. Tool-RBAC denials stay `403`: they name a tool, not a
     resource.
-13. **`visibleTo()` exists exactly once**, in `authz.ts`, and both callers import
-    it — the gateway for a direct fetch, the mock tool service for a scoped
-    search. A second copy is how search starts returning rows the fetch path
-    hides. Scope travels in `x-launchpad-scope`, is attached only by the gateway
-    when forwarding, and a tool call missing it is refused.
+13. **`visibleTo()` exists exactly once**, in `authz.ts`, and every caller
+    imports it — the gateway for a direct fetch, and the mock tool service for
+    both a scoped search and the single-document route. A second copy is how
+    search starts returning rows the fetch path hides. Scope travels in
+    `x-launchpad-scope`, is attached only by the gateway when forwarding, and a
+    tool call missing it is refused — the document route included, which
+    re-derives the gateway's ownership answer rather than trusting it. The two
+    layers can only agree; the point is that the direct fetch is not one mistake
+    upstream away from serving somebody else's document.
 14. **A spent-out owner's model call is refused before it is made.** The budget
     is checked after `can()` and before the forward, so a refusal is a `402`
     with one audit `deny` row and **no upstream request** — a refused call costs
@@ -532,6 +559,30 @@ to do, on whose authority, and why.
   agent already knows. On the allow path a store that cannot accept the record
   stops the call; on a deny path a failed write is logged and the denial stands
   — evidence trouble must never rescue a caller.
+- **One append, not a database rewrite.** Records live in an append-only sidecar
+  beside the database, `<db>.audit.jsonl` (the path is derived in
+  `auditFilePath`, never configured — an evidence file that can drift away from
+  the database it belongs to is a way to lose evidence). `JsonStore.appendAudit`
+  is the only writer: it appends one JSON line, on the store's own write queue,
+  **before** the in-memory push, and rejects if the line did not land. That is
+  what keeps the contract above affordable — this is the busiest write in the
+  system and it sits in front of every agent's answer, so filing a decision now
+  costs one `appendFile` rather than a clone, stringify, and rewrite of the
+  entire accumulated history. `persist()` names the collections it writes field
+  by field and no longer writes an `audit` key at all; a legacy `db.json` that
+  still carries one migrates its records into the sidecar on boot — legacy
+  records first, in one atomic rewrite, idempotent across restarts — and a torn
+  final line from a crash mid-append is skipped rather than fatal.
+- **Retention is a rolling window.** The store keeps the newest
+  `AUDIT_RETENTION_LIMIT` decisions (default `1000`), evicting oldest-first as
+  it appends, and compacts the sidecar when its line count outgrows the limit by
+  `AUDIT_COMPACTION_FACTOR` — or at boot, whenever the file would otherwise
+  disagree with memory. Retention decides how long a record is **kept**, never
+  whether it is **written**: every decision is still recorded before the answer,
+  and old evidence ages out oldest-first because the decision an operator is
+  asked about is nearly always a recent one. A long-lived deployment that needs
+  the full history needs an export this POC does not have
+  ([ADR](docs/adr/2026-08-31-audit-sidecar-and-retention.md)).
 - **Identity is a store fact.** `humanId` / `agentId` / `runId` come from the
   resolved `Principal`, or from the stored `RunSession` when a call was refused
   before a principal could be resolved. Claims from a credential the gateway

@@ -23,6 +23,9 @@ credentials, personal data, or exploit details in an issue.
   Agent Runtime, so a prompt that asks an Agent to print `ARK_API_KEY` finds
   nothing to print. Codex reaches the model through the Agent Access Gateway
   (`POST /gateway/v1/responses`), which attaches the key on the way upstream.
+  That forwarded request carries an allowlist of headers — the ones describing
+  its own payload — rather than everything the caller sent, so a header an Agent
+  chose does not travel to the upstream under the platform's credential.
 - The gateway verifies a per-run credential before forwarding anything: a
   missing, forged, expired, or revoked token is answered with `401` and the
   upstream is never called. `/gateway/*` stays outside the `APP_AUTH_TOKEN`
@@ -50,7 +53,11 @@ credentials, personal data, or exploit details in an issue.
   a forbidden hit and cannot map another human's documents or learn who owns
   what. Search is scoped the same way: rows the caller may not see are absent
   rather than denied, and the tool service refuses a call that arrives without
-  the gateway-computed scope header. The audit trail still records the true
+  the gateway-computed scope header. The single-document route enforces that
+  same predicate against that same header, so an ownership mistake in the
+  gateway is not by itself enough to serve a document; the two layers are
+  independent, answer identically, and the second hides an out-of-scope document
+  exactly as it hides an unknown id. The audit trail still records the true
   reason (`deny`, naming the owner), so the operator's view and the Agent's view
   deliberately differ — the Agent learns nothing, the operator learns
   everything. Not addressed: response-time uniformity between the two `404`
@@ -114,6 +121,18 @@ credentials, personal data, or exploit details in an issue.
   smuggled into one. The trail still names humans, Agents, and what they were
   refused, so `GET /api/runs/:id/audit` sits behind `APP_AUTH_TOKEN` with the
   rest of `/api` and is never readable by an Agent.
+- The evidence is a rolling window, not a full history. Records are appended one
+  line at a time to a sidecar beside the database and retained up to
+  `AUDIT_RETENTION_LIMIT` (default 1000), with the oldest evicted first once the
+  cap is passed. Retention bounds how long a decision is kept, never whether it
+  is recorded — every decision is still written before the answer — but a busy
+  or long-lived deployment will lose its earliest decisions, and there is no
+  export, archive, or off-host shipping to catch them. Nothing signs or
+  chain-hashes the sidecar either, so anyone with write access to the data
+  directory can edit or truncate it undetected. Accepted for POC scope: the
+  demo's evidence is minutes old and the whole store is single-process and
+  local. A real deployment needs an append-only log with retention measured in
+  time, not count, and integrity protection the writing process cannot forge.
 - Run credentials are bearer tokens carried over plain HTTP between the Runtime
   container and the host gateway. They are per-run, revocable, and expire with
   the turn, but anyone who can read that local traffic during a run can replay

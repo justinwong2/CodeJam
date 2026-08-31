@@ -180,6 +180,8 @@ interface UpstreamCall {
   url: string;
   authorization: string;
   contentType: string;
+  /** Every header that reached the upstream, so what is *absent* is assertable. */
+  headers: Record<string, string | string[] | undefined>;
   body: string;
 }
 
@@ -210,6 +212,7 @@ async function startUpstream(
         url: request.url ?? "",
         authorization: request.headers.authorization ?? "",
         contentType: request.headers["content-type"] ?? "",
+        headers: request.headers,
         body: await readBody(request),
       };
       calls.push(call);
@@ -273,6 +276,43 @@ describe("Model gateway", () => {
     expect(call?.authorization).not.toContain(runJwt);
     expect(call?.contentType).toBe("application/json");
     expect(call?.body).toBe(payload);
+    await app.close();
+  });
+
+  it("carries no agent-set header upstream with the platform's key", async () => {
+    // The forwarded request is the one that holds the Ark credential, so it
+    // travels with an allowlist: only what describes this payload. A header the
+    // agent chose must not reach the upstream under the platform's identity.
+    const upstream = await startEchoUpstream();
+    const session = liveSession();
+    const app = await createApp(
+      configFor(upstream.baseUrl),
+      serviceWith(session),
+    );
+
+    const response = await app.inject({
+      method: "POST",
+      url: "/gateway/v1/responses",
+      headers: {
+        "content-type": "application/json",
+        accept: "text/event-stream",
+        authorization: `Bearer ${credentialFor(session)}`,
+        "x-agent-chosen": "smuggled",
+        cookie: "session=agent-set",
+        "openai-organization": "org-agent-set",
+      },
+      payload: '{"model":"ep-test"}',
+    });
+
+    expect(response.statusCode).toBe(200);
+    const forwarded = upstream.calls[0]?.headers ?? {};
+    // What the payload needs still travels.
+    expect(forwarded["content-type"]).toBe("application/json");
+    expect(forwarded.accept).toBe("text/event-stream");
+    // What the agent invented does not.
+    expect(forwarded["x-agent-chosen"]).toBeUndefined();
+    expect(forwarded.cookie).toBeUndefined();
+    expect(forwarded["openai-organization"]).toBeUndefined();
     await app.close();
   });
 
@@ -1562,6 +1602,37 @@ describe("Tool gateway", () => {
     // denial. Every answered call leaves exactly one row behind.
     expect(fixture.audit(fixture.runIds[0] ?? "")).toMatchObject([
       { tool: "docs", resource: "docs/doc-nonexistent", decision: "deny" },
+    ]);
+  });
+
+  it("refuses a document path naming more than one segment", async () => {
+    // Authorizing the first segment and forwarding the rest would decide one
+    // thing and forward another. Refused on the shape of the path alone, before
+    // any lookup, so the answer cannot vary with what exists or who owns it.
+    const fixture = await toolFixture();
+    const runJwt = await fixture.runAs("user-a");
+
+    const response = await callTool(fixture.app, runJwt, "docs/doc-a1/extra");
+
+    expect(response.statusCode).toBe(400);
+    expect(fixture.toolCalls).toEqual([]);
+    expect(fixture.audit(fixture.runIds[0] ?? "")).toMatchObject([
+      { tool: "docs", resource: "docs/doc-a1/extra", decision: "deny" },
+    ]);
+  });
+
+  it("records and forwards the document it authorized, not the path it was given", async () => {
+    // A trailing slash is the same document; the record and the forwarded path
+    // both name what `can()` actually decided about.
+    const fixture = await toolFixture();
+    const runJwt = await fixture.runAs("user-a");
+
+    const response = await callTool(fixture.app, runJwt, "docs/doc-a1/");
+
+    expect(response.statusCode).toBe(200);
+    expect(fixture.toolCalls).toEqual(["/internal/tools/docs/doc-a1"]);
+    expect(fixture.audit(fixture.runIds[0] ?? "")).toMatchObject([
+      { tool: "docs", resource: "docs/doc-a1", decision: "allow" },
     ]);
   });
 

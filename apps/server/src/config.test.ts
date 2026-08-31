@@ -127,3 +127,31 @@ describe("Tool service credential configuration", () => {
     expect(config.gatewayToolCredential).toBe(credential);
   });
 });
+
+describe("Audit retention configuration", () => {
+  const base = { NODE_ENV: "test", GATEWAY_JWT_SECRET: SECRET };
+
+  it("defaults to a limit a demo will never reach", () => {
+    expect(loadConfig({ ...base }).auditRetentionLimit).toBe(1000);
+  });
+
+  it("takes the configured limit, coerced from the environment string", () => {
+    expect(
+      loadConfig({ ...base, AUDIT_RETENTION_LIMIT: "50" }).auditRetentionLimit,
+    ).toBe(50);
+  });
+
+  it("refuses a limit too small to hold a run's decisions", () => {
+    expect(() => loadConfig({ ...base, AUDIT_RETENTION_LIMIT: "3" })).toThrow(
+      /AUDIT_RETENTION_LIMIT/,
+    );
+  });
+
+  it("refuses a limit that is not a number at all", () => {
+    // Fail loudly at boot: silently defaulting a retention limit is how a
+    // deployment discovers months later that it kept nothing it meant to.
+    expect(() =>
+      loadConfig({ ...base, AUDIT_RETENTION_LIMIT: "a thousand" }),
+    ).toThrow(/AUDIT_RETENTION_LIMIT/);
+  });
+});

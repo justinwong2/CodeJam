@@ -46,10 +46,16 @@ Summary — canonical list is in [CLAUDE.md](CLAUDE.md#invariants-to-preserve).
     _invisible_, so the answer is the same `404` a nonexistent id gets while the
     audit row carries the true ownership reason.
 11. Visibility is decided by one predicate, `visibleTo()` in `authz.ts`, imported
-    by the gateway (direct fetch) and the mock tool service (search Scope). Never
-    a second copy: a drifting copy is how search leaks what a fetch hides.
+    by the gateway (direct fetch) and the mock tool service (search Scope _and_
+    the single-document route, which re-derives the gateway's answer instead of
+    trusting it). Never a second copy: a drifting copy is how search leaks what a
+    fetch hides.
 12. Every gateway decision leaves exactly one redacted audit record, written
-    before the answer is sent. No request or response body is persisted.
+    before the answer is sent. No request or response body is persisted. The
+    record is one line appended to the audit sidecar (`<db>.audit.jsonl`) rather
+    than a rewrite of `db.json`, and it is awaited before the answer just as the
+    old write was. `AUDIT_RETENTION_LIMIT` (default `1000`) bounds how long a
+    record is kept, never whether it is written.
 
 ## Repo Map
 
@@ -57,7 +63,7 @@ Summary — canonical list is in [CLAUDE.md](CLAUDE.md#invariants-to-preserve).
 | ------------------------------------------- | ------------------------------- |
 | `apps/server/src/app.ts`                    | Routes, request boundary        |
 | `apps/server/src/agent-service.ts`          | Orchestration, Run state        |
-| `apps/server/src/store.ts`                  | JSON persistence                |
+| `apps/server/src/store.ts`                  | JSON persistence, audit sidecar |
 | `apps/server/src/config.ts`                 | Env parsing and validation      |
 | `apps/server/src/types.ts`                  | Domain types, `AgentRunner`     |
 | `apps/server/src/codex-runner.ts`           | Codex as host process           |
@@ -127,7 +133,9 @@ ownership denial is the exception: it answers `404 { error: "Document not
 found" }`, byte-identical to an unknown id, and files the real reason. Search is
 scoped rather than denied — the gateway sends the principal's owner id in
 `x-launchpad-scope`, and the tool service filters with the same `visibleTo` and
-refuses a call that carries no scope. Forwarding targets the mock tool service at
+refuses a call that carries no scope — on the document route as well as on
+search. A `docs` suffix naming more than one segment is a `400`, and the id the
+gateway authorized is what it records and forwards. Forwarding targets the mock tool service at
 `/internal/tools/*`, which accepts only calls carrying
 `GATEWAY_TOOL_CREDENTIAL` — the credential is what makes skipping the gateway a
 refusal rather than a shortcut.

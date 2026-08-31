@@ -1,4 +1,10 @@
-import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
+import {
+  appendFile,
+  mkdir,
+  readFile,
+  rename,
+  writeFile,
+} from "node:fs/promises";
 import path from "node:path";
 import { DEFAULT_OWNER_ID, TOOL_NAMES } from "./types.js";
 import type {
@@ -232,14 +238,85 @@ export function migrateDatabase(parsed: unknown): Database {
   };
 }
 
+/**
+ * Where a store keeps its audit records. They are the highest-frequency write
+ * in the system — one per gateway decision, awaited before the agent is
+ * answered — so they live in an append-only sidecar rather than in the
+ * whole-database rewrite `db.json` costs. The path is derived rather than
+ * configured: an evidence file that can drift away from the database it belongs
+ * to is a way to lose evidence.
+ */
+export function auditFilePath(databasePath: string): string {
+  return path.extname(databasePath) === ".json"
+    ? databasePath.slice(0, -".json".length) + ".audit.jsonl"
+    : databasePath + ".audit.jsonl";
+}
+
+/**
+ * How many audit records a store keeps when nobody says otherwise. It matches
+ * the `AUDIT_RETENTION_LIMIT` default in `config.ts`: a store built without a
+ * limit must behave like the server's, not like an unbounded one.
+ */
+export const DEFAULT_AUDIT_RETENTION_LIMIT = 1000;
+
+/**
+ * How far past the retention limit the sidecar may grow before it is rewritten.
+ * The file is append-only, so eviction alone leaves the evicted lines on disk;
+ * compacting on every append would trade the sidecar's whole point — one append
+ * per decision — for tidiness. Four times the limit bounds the waste at a
+ * factor nobody will notice while making a rewrite rare.
+ */
+const AUDIT_COMPACTION_FACTOR = 4;
+
+/**
+ * Parses the sidecar. A line the parser cannot read is skipped rather than
+ * fatal: the only way one gets there is a process that died mid-append, which
+ * leaves a torn final line, and refusing to start over a half-written record
+ * would trade every surviving record for the one that did not survive.
+ */
+function parseAuditLines(raw: string): AuditRecord[] {
+  const records: AuditRecord[] = [];
+  for (const line of raw.split("\n")) {
+    const trimmed = line.trim();
+    if (trimmed.length === 0) {
+      continue;
+    }
+    try {
+      records.push(JSON.parse(trimmed) as AuditRecord);
+    } catch {
+      // Deliberately silent: the store has no logger, and a torn tail is an
+      // expected consequence of a crash rather than a condition to report.
+    }
+  }
+  return records;
+}
+
 export class JsonStore {
   private data: Database = emptyDatabase();
   private queue: Promise<void> = Promise.resolve();
+  private readonly auditPath: string;
+  /**
+   * Lines the sidecar is believed to hold: what `initialize` loaded or wrote,
+   * plus every append since. Eviction is an in-memory drop, so without this the
+   * file would grow forever behind a bounded `data.audit`.
+   */
+  private auditLines = 0;
 
-  constructor(private readonly filePath: string) {}
+  /**
+   * The retention limit defaults rather than being required, so a caller that
+   * only wants a store — every test, and any future tool — still gets the same
+   * bound the server runs with instead of an unbounded one by omission.
+   */
+  constructor(
+    private readonly filePath: string,
+    private readonly auditRetentionLimit = DEFAULT_AUDIT_RETENTION_LIMIT,
+  ) {
+    this.auditPath = auditFilePath(filePath);
+  }
 
   async initialize(): Promise<void> {
     await mkdir(path.dirname(this.filePath), { recursive: true });
+    const sidecar = await this.readAudit();
     let raw: string;
     try {
       raw = await readFile(this.filePath, "utf8");
@@ -247,13 +324,52 @@ export class JsonStore {
       if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
         throw error;
       }
+      this.data = emptyDatabase();
+      await this.adoptAudit(sidecar, false);
       await this.persist();
       return;
     }
     this.data = migrateDatabase(JSON.parse(raw));
+    // A database written before the sidecar existed still carries its audit
+    // array. Those records are older than anything the sidecar can hold, so
+    // they go in front of it and the combined list is rewritten in one atomic
+    // pass — appending them instead would both reorder the timeline and, on a
+    // second start, file a duplicate of every record already carried over.
+    const legacy = this.data.audit;
+    await this.adoptAudit([...legacy, ...sidecar], legacy.length > 0);
     // Write the upgraded shape back now, so the file on disk and the schema
-    // this process assumes never disagree.
+    // this process assumes never disagree. `persist` omits the audit key, which
+    // is what drops the migrated records from `db.json`.
     await this.persist();
+  }
+
+  /**
+   * Takes the records a start found and settles what this process holds and
+   * what the sidecar says. Over the limit, the newest `limit` survive: retention
+   * drops the oldest evidence first, because the decision an operator is asked
+   * about is nearly always a recent one. The sidecar is rewritten whenever it
+   * would otherwise disagree with memory — after a trim, or after a migration
+   * moved records out of `db.json` — so boot is also the moment a file that grew
+   * past the cap in an earlier process is brought back under it.
+   */
+  private async adoptAudit(
+    records: AuditRecord[],
+    migrated: boolean,
+  ): Promise<void> {
+    const retained =
+      records.length > this.auditRetentionLimit
+        ? records.slice(records.length - this.auditRetentionLimit)
+        : records;
+    this.data.audit = retained;
+    if (migrated || retained.length !== records.length) {
+      await this.rewriteAudit(retained);
+      this.auditLines = retained.length;
+      return;
+    }
+    // Nothing was rewritten, so the file is as it was found. A torn tail the
+    // parser skipped is not counted; the count only decides when to compact,
+    // and undercounting there costs a slightly later rewrite, nothing more.
+    this.auditLines = records.length;
   }
 
   snapshot(): Database {
@@ -284,9 +400,84 @@ export class JsonStore {
     return result;
   }
 
+  /**
+   * Files one audit record for the cost of one append instead of a rewrite of
+   * the whole database. It shares `mutate`'s queue rather than running beside
+   * it: `mutate` clones the database, mutates the clone and swaps it in, so a
+   * push that landed between the clone and the swap would be dropped without a
+   * trace — the one outcome an evidence trail may never have. The append
+   * happens before the in-memory push, and a failure rejects, because the
+   * gateway relies on an unrecorded decision stopping the call it was about.
+   *
+   * Retention runs here too, inside the same queued operation: the record is on
+   * disk before anything is evicted, and a compaction that crosses the file
+   * threshold is awaited rather than detached, so no reader can catch the
+   * sidecar mid-rewrite and no failure can be swallowed by a floating promise.
+   */
+  async appendAudit(record: AuditRecord): Promise<void> {
+    const operation = this.queue.then(async () => {
+      await appendFile(this.auditPath, JSON.stringify(record) + "\n", {
+        encoding: "utf8",
+        mode: 0o600,
+      });
+      this.auditLines += 1;
+      this.data.audit.push(record);
+      while (this.data.audit.length > this.auditRetentionLimit) {
+        this.data.audit.shift();
+      }
+      if (
+        this.auditLines >
+        this.auditRetentionLimit * AUDIT_COMPACTION_FACTOR
+      ) {
+        await this.rewriteAudit(this.data.audit);
+        this.auditLines = this.data.audit.length;
+      }
+    });
+    this.queue = operation.catch(() => undefined);
+    await operation;
+  }
+
+  private async readAudit(): Promise<AuditRecord[]> {
+    try {
+      return parseAuditLines(await readFile(this.auditPath, "utf8"));
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+        throw error;
+      }
+      return [];
+    }
+  }
+
+  /**
+   * The one path that rewrites the sidecar wholesale — for the migration, for a
+   * boot that trimmed, and for a compaction. It writes to a temporary file and
+   * renames, so a reader sees either the old file or the new one.
+   */
+  private async rewriteAudit(records: AuditRecord[]): Promise<void> {
+    const temporaryPath = this.auditPath + ".tmp";
+    await writeFile(
+      temporaryPath,
+      records.map((record) => JSON.stringify(record) + "\n").join(""),
+      { encoding: "utf8", mode: 0o600 },
+    );
+    await rename(temporaryPath, this.auditPath);
+  }
+
   private async persist(data: Database = this.data): Promise<void> {
+    // Named field by field rather than spread-minus-audit, so that a collection
+    // added later is a deliberate line here instead of silently riding along
+    // and so that the audit records in memory cannot leak back into `db.json`.
+    const persisted = {
+      version: data.version,
+      agents: data.agents,
+      messages: data.messages,
+      runs: data.runs,
+      sessions: data.sessions,
+      users: data.users,
+      docs: data.docs,
+    };
     const temporaryPath = this.filePath + ".tmp";
-    await writeFile(temporaryPath, JSON.stringify(data, null, 2) + "\n", {
+    await writeFile(temporaryPath, JSON.stringify(persisted, null, 2) + "\n", {
       encoding: "utf8",
       mode: 0o600,
     });

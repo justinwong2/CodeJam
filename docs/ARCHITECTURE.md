@@ -131,6 +131,17 @@ carrying no scope — the gateway is its only caller and always decides one. The
 gateway never parses the response bytes, so it never learns which rows were
 excluded.
 
+The single-document route applies that same predicate against that same header,
+so a direct fetch is checked on both sides of the forward. The gateway has
+already resolved ownership by then and the two can only agree — which is the
+point of doing it twice: the path that serves one document by id is not left one
+mistake upstream away from serving somebody else's. The service answers a
+document outside the scope exactly as it answers an unknown id, so the second
+layer is not an existence oracle of its own. A `docs` suffix naming more than one
+path segment is refused `400` on the shape of the path alone, before any lookup,
+and what the gateway records and forwards is the id it authorized rather than the
+raw path it was handed.
+
 Whichever route was taken and whichever way it went, the gateway files exactly
 one record through `AuditLog` in `apps/server/src/audit.ts` **before** it
 answers: a forward is an `allow`, any refusal that reached a decision is a
@@ -169,7 +180,8 @@ Interrupted Runs become `cancelled` after a restart.
 ### Storage
 
 ```text
-data/launchpad.json       Agent, message, Run, session, and audit records
+data/launchpad.json       Agent, message, Run, session, and document records
+data/launchpad.audit.jsonl  Gateway decisions, one JSON line each
 workspaces/AgentID/       Agent-created files
 workspaces/.deleted/      Archived deleted workspaces
 codex-home/               Codex configuration and sessions
@@ -177,6 +189,20 @@ codex-home/               Codex configuration and sessions
 
 `JsonStore` serializes writes and atomically replaces one JSON file. It supports
 one process only.
+
+Audit records are the exception, and deliberately so: they are the
+highest-frequency write in the system — one per gateway decision, awaited in
+front of every agent's answer — so keeping them in `launchpad.json` made
+authorizing one call cost a rewrite of the whole accumulated history. They live
+instead in an append-only sidecar whose path is derived from the database's, one
+line per decision, on the same write queue and with the same
+written-before-the-answer contract. A legacy database still carrying an `audit`
+array migrates into the sidecar at boot; a line torn by a crash mid-append is
+skipped. `AUDIT_RETENTION_LIMIT` (default `1000`) makes the trail a rolling
+window — newest kept, oldest evicted, the file compacted when it drifts far
+enough past the cap — which bounds how long a record is kept and never whether
+it is written. See
+[adr/2026-08-31-audit-sidecar-and-retention.md](adr/2026-08-31-audit-sidecar-and-retention.md).
 
 ### Runtime providers
 
