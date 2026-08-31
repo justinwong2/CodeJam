@@ -30,6 +30,19 @@ export const TOOL_CREDENTIAL_HEADER = "x-launchpad-tool-credential";
 export const TOOL_SCOPE_HEADER = "x-launchpad-scope";
 
 /**
+ * The one answer a `docs` call gets for a document it may not read — whether
+ * the id names nothing at all or names something owned by somebody else. Both
+ * paths send this exact body, so a caller enumerating ids collects a uniform
+ * wall of 404s and learns neither which documents exist nor who owns them. The
+ * true reason is written to the audit trail instead; see
+ * docs/adr/2026-08-30-invisible-documents.md.
+ *
+ * It lives here, and the gateway imports it, because the two answers are only
+ * indistinguishable for as long as they are the same string.
+ */
+export const DOCUMENT_NOT_FOUND = "Document not found";
+
+/**
  * The tools the gateway proxies. `model` is deliberately absent: it has its own
  * route and its own upstream, and a path naming anything outside this list
  * names no tool at all.
@@ -97,11 +110,32 @@ export async function registerMockTools(
         }
       });
 
+      // The second lock on a door the gateway has already checked. The gateway
+      // resolves ownership before it forwards, so this can only ever agree with
+      // it — deriving the same answer independently is the point: a direct
+      // fetch should not be the one path where a single mistake upstream is all
+      // that stands between an agent and somebody else's document. `/search`
+      // below has always re-derived its own answer; this is that same
+      // discipline applied to the route that serves one document.
       scope.get("/docs/:docId", async (request, reply) => {
+        const authorizedScope = request.headers[TOOL_SCOPE_HEADER];
+        if (
+          typeof authorizedScope !== "string" ||
+          authorizedScope.trim().length === 0
+        ) {
+          // Fail closed, exactly as the search route does.
+          request.log.warn(
+            "Tool service refused a document fetch that carried no authorized scope",
+          );
+          return reply.code(400).send({ error: "Tool scope required" });
+        }
         const { docId } = docParams.parse(request.params);
         const doc = directory.findMockDoc(docId);
-        if (!doc) {
-          return reply.code(404).send({ error: "Document not found" });
+        // An id that names nothing and one this scope may not see answer
+        // identically, so the second check adds a layer without turning this
+        // route into an existence oracle of its own.
+        if (!doc || !visibleTo(doc, authorizedScope)) {
+          return reply.code(404).send({ error: DOCUMENT_NOT_FOUND });
         }
         return { doc };
       });

@@ -5,6 +5,7 @@ import { AuditLog, type AuditIdentity } from "./audit.js";
 import { can, type OwnedResource } from "./authz.js";
 import type { AppConfig } from "./config.js";
 import {
+  DOCUMENT_NOT_FOUND,
   MOCK_TOOLS_PREFIX,
   TOOL_CREDENTIAL_HEADER,
   TOOL_SCOPE_HEADER,
@@ -36,16 +37,6 @@ export function gatewayBaseUrl(host: string, port: number): string {
   return `http://${host}:${port}${GATEWAY_PREFIX}`;
 }
 
-/**
- * The one answer a `docs` call gets for a document it may not read — whether
- * the id names nothing at all or names something owned by somebody else. Both
- * paths send this exact body, so a caller enumerating ids collects a uniform
- * wall of 404s and learns neither which documents exist nor who owns them. The
- * true reason is written to the audit trail instead; see
- * docs/adr/2026-08-30-invisible-documents.md.
- */
-const DOCUMENT_NOT_FOUND = "Document not found";
-
 // A model call carries the whole conversation, so the app-level 1 MiB body
 // limit is far too small for this scope.
 const GATEWAY_BODY_LIMIT = 33_554_432;
@@ -61,16 +52,13 @@ const HOP_BY_HOP_HEADERS = [
   "upgrade",
 ];
 
-// `authorization` is replaced with the injected credential; `host` and the
-// framing headers describe this hop only; `accept-encoding` is left to fetch,
-// which transparently decodes the upstream body.
-const DROPPED_REQUEST_HEADERS = new Set([
-  ...HOP_BY_HOP_HEADERS,
-  "accept-encoding",
-  "authorization",
-  "content-length",
-  "host",
-]);
+// An allowlist rather than a denylist, and the same one `forwardToTool`
+// applies downstream. This is the request that carries the platform's own Ark
+// credential, so only the headers describing *this* payload travel with it:
+// anything else the agent set stays with the agent instead of reaching the
+// upstream under the platform's identity. `authorization` is absent because it
+// is replaced outright, and framing headers because fetch re-frames the body.
+const FORWARDED_REQUEST_HEADERS = new Set(["accept", "content-type"]);
 
 // fetch has already decoded and re-framed the upstream body, so forwarding the
 // upstream's own framing headers would describe bytes we are no longer sending.
@@ -85,7 +73,7 @@ function upstreamHeaders(request: FastifyRequest, apiKey: string): Headers {
   for (const [name, value] of Object.entries(request.headers)) {
     if (
       value === undefined ||
-      DROPPED_REQUEST_HEADERS.has(name.toLowerCase())
+      !FORWARDED_REQUEST_HEADERS.has(name.toLowerCase())
     ) {
       continue;
     }
@@ -348,7 +336,12 @@ function resolvePrincipal(
 }
 
 type ResourceResolution =
-  | { ok: true; resource?: OwnedResource }
+  /**
+   * `suffix` is the path the decision actually covers, which is not always the
+   * path that was asked for: a `docs` call authorizes one document id, so the
+   * canonical id is what gets recorded and forwarded.
+   */
+  | { ok: true; resource?: OwnedResource; suffix: string }
   | { ok: false; status: number; error: string };
 
 /**
@@ -362,11 +355,23 @@ function resolveResource(
   tool: ProxyableTool,
   suffix: string,
 ): ResourceResolution {
-  if (tool !== "docs") return { ok: true };
-  const docId = suffix.split("/")[0] ?? "";
-  if (docId.length === 0) {
+  if (tool !== "docs") return { ok: true, suffix };
+  const segments = suffix.split("/").filter((segment) => segment.length > 0);
+  if (segments.length === 0) {
     return { ok: false, status: 400, error: "A document id is required" };
   }
+  // Refused on the shape of the path alone, before anything is looked up, so
+  // the answer cannot vary with whether a document exists or who owns it. The
+  // alternative — authorizing the first segment and forwarding the rest — would
+  // decide one thing and forward another.
+  if (segments.length > 1) {
+    return {
+      ok: false,
+      status: 400,
+      error: "A document id is a single path segment",
+    };
+  }
+  const docId = segments[0] as string;
   const doc = directory.findMockDoc(docId);
   if (!doc) {
     // Answered before the tool service is called: there is no owner to compare
@@ -376,6 +381,7 @@ function resolveResource(
   return {
     ok: true,
     resource: { ownerId: doc.ownerId, visibility: doc.visibility },
+    suffix: docId,
   };
 }
 
@@ -489,6 +495,10 @@ async function proxyTool(
     await recordDenial(audit, request, principal, tool, resource, target.error);
     return reply.code(target.status).send({ error: target.error });
   }
+  // From here the record and the forward both name what was actually resolved
+  // rather than the raw path that was asked for, so the evidence trail cannot
+  // claim a decision covered more than it did.
+  const resolved = auditResource(tool, target.suffix);
   if (target.resource) {
     const ownershipDecision = can(principal, tool, target.resource);
     if (!ownershipDecision.allow) {
@@ -503,7 +513,7 @@ async function proxyTool(
             reply,
             principal,
             tool,
-            resource,
+            resolved,
             ownershipDecision.reason,
           )
         : deny(
@@ -512,7 +522,7 @@ async function proxyTool(
             reply,
             principal,
             tool,
-            resource,
+            resolved,
             ownershipDecision.reason,
           );
     }
@@ -525,11 +535,18 @@ async function proxyTool(
   await audit.record({
     identity: principal,
     tool,
-    resource,
+    resource: resolved,
     decision: "allow",
     reason: allowed,
   });
-  return forwardToTool(config, request, reply, tool, suffix, principal.ownerId);
+  return forwardToTool(
+    config,
+    request,
+    reply,
+    tool,
+    target.suffix,
+    principal.ownerId,
+  );
 }
 
 /**

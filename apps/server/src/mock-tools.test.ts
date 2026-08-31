@@ -118,7 +118,7 @@ describe("Mock tool service routes", () => {
     const response = await app.inject({
       method: "GET",
       url: `${MOCK_TOOLS_PREFIX}/docs/doc-b1`,
-      headers: withCredential,
+      headers: { ...withCredential, [TOOL_SCOPE_HEADER]: "user-b" },
     });
     expect(response.statusCode).toBe(200);
     expect(response.json()).toEqual({
@@ -132,9 +132,78 @@ describe("Mock tool service routes", () => {
     const response = await app.inject({
       method: "GET",
       url: `${MOCK_TOOLS_PREFIX}/docs/doc-nonexistent`,
-      headers: withCredential,
+      headers: { ...withCredential, [TOOL_SCOPE_HEADER]: "user-a" },
     });
     expect(response.statusCode).toBe(404);
+    await app.close();
+  });
+
+  it("refuses a document fetch that carries no scope", async () => {
+    // The same fail-closed rule the search route has always had: the gateway is
+    // the only caller and always decides a scope, so a missing one is a bug —
+    // and a bug must not be answered with somebody's document.
+    const app = await toolApp();
+    const response = await app.inject({
+      method: "GET",
+      url: `${MOCK_TOOLS_PREFIX}/docs/doc-b1`,
+      headers: withCredential,
+    });
+    expect(response.statusCode).toBe(400);
+    expect(response.json()).toEqual({ error: "Tool scope required" });
+    expect(response.body).not.toContain("onboarding notes");
+    await app.close();
+  });
+
+  it("re-derives the visibility rule instead of trusting its caller", async () => {
+    // The gateway checks ownership before it forwards, so this can only agree
+    // with it. Checking anyway is the point: the direct-fetch path is no longer
+    // one mistake upstream away from serving somebody else's document.
+    const app = await toolApp();
+    const response = await app.inject({
+      method: "GET",
+      url: `${MOCK_TOOLS_PREFIX}/docs/doc-b1`,
+      headers: { ...withCredential, [TOOL_SCOPE_HEADER]: "user-a" },
+    });
+    expect(response.statusCode).toBe(404);
+    expect(response.body).not.toContain("onboarding notes");
+    await app.close();
+  });
+
+  it("hides a document from a scope exactly as it hides an unknown id", async () => {
+    // Byte-identical here too, not only at the gateway: a second layer that
+    // answered differently would be an existence oracle of its own.
+    const app = await toolApp();
+    const scoped = { ...withCredential, [TOOL_SCOPE_HEADER]: "user-a" };
+    const forbidden = await app.inject({
+      method: "GET",
+      url: `${MOCK_TOOLS_PREFIX}/docs/doc-b1`,
+      headers: scoped,
+    });
+    const unknown = await app.inject({
+      method: "GET",
+      url: `${MOCK_TOOLS_PREFIX}/docs/doc-nonexistent`,
+      headers: scoped,
+    });
+    expect(forbidden.statusCode).toBe(unknown.statusCode);
+    expect(forbidden.body).toBe(unknown.body);
+    expect(forbidden.headers["content-type"]).toBe(
+      unknown.headers["content-type"],
+    );
+    await app.close();
+  });
+
+  it("serves a public document to a scope that does not own it", async () => {
+    // Public widens who may read; the second check must not narrow that back.
+    const app = await toolApp();
+    const response = await app.inject({
+      method: "GET",
+      url: `${MOCK_TOOLS_PREFIX}/docs/kb-1`,
+      headers: { ...withCredential, [TOOL_SCOPE_HEADER]: "user-b" },
+    });
+    expect(response.statusCode).toBe(200);
+    expect((response.json() as { doc: { ownerId: string } }).doc.ownerId).toBe(
+      "user-a",
+    );
     await app.close();
   });
 
