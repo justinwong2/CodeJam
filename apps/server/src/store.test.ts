@@ -189,6 +189,46 @@ describe("Seeded users and ownership", () => {
     ]);
   });
 
+  /**
+   * `[]` and `null` are different policies, and the difference must survive a
+   * restart. An Agent deliberately granted nothing that reloads as `null`
+   * silently inherits everything its owner's role allows — the one direction
+   * this loader is never permitted to fail in.
+   */
+  it("keeps an empty grant empty across a reload rather than collapsing it to inherit", async () => {
+    const filePath = await temporaryFile();
+    await writeFile(
+      filePath,
+      JSON.stringify({
+        version: DATABASE_VERSION,
+        agents: [
+          { ...legacyAgent, id: "granted-nothing", toolGrants: [] },
+          { ...legacyAgent, id: "inherits", toolGrants: null },
+        ],
+      }),
+      "utf8",
+    );
+
+    const store = new JsonStore(filePath);
+    await store.initialize();
+    expect(
+      store.snapshot().agents.map((agent) => [agent.id, agent.toolGrants]),
+    ).toEqual([
+      ["granted-nothing", []],
+      ["inherits", null],
+    ]);
+
+    // The distinction is durable, not just an artifact of the first parse.
+    const reopened = new JsonStore(filePath);
+    await reopened.initialize();
+    expect(
+      reopened.snapshot().agents.map((agent) => [agent.id, agent.toolGrants]),
+    ).toEqual([
+      ["granted-nothing", []],
+      ["inherits", null],
+    ]);
+  });
+
   it("seeds the demo users once, not once per start", async () => {
     const filePath = await temporaryFile();
     const store = new JsonStore(filePath);

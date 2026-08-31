@@ -188,6 +188,23 @@ describe("can()", () => {
     expect(decision.reason).toContain("not delegated");
   });
 
+  /**
+   * The discriminating case for check order: a principal denied by *both* the
+   * owner's role and the Agent's grants. Broadest-to-narrowest means the reason
+   * names the role — the ceiling nobody may raise — rather than the delegation,
+   * which is only the narrower of two failures. The audit trail carries this
+   * reason verbatim, so the order is what an operator reads.
+   */
+  it("names the owner role, not the delegation, when both would deny", () => {
+    const denied = can(
+      { ...principal("basic"), toolGrants: ["model", "docs"] },
+      "payments",
+    );
+    expect(denied.allow).toBe(false);
+    expect(denied.reason).toContain('Role "basic"');
+    expect(denied.reason).not.toContain("not delegated");
+  });
+
   it("checks the role before ownership, so a denial says what was wrong first", () => {
     // A basic principal reaching for someone else's payments resource is
     // denied for the tool it may never use, not for the ownership it lacks.

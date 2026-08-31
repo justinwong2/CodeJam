@@ -1,4 +1,4 @@
-import { mkdtemp } from "node:fs/promises";
+import { mkdtemp, readFile } from "node:fs/promises";
 import path from "node:path";
 import { tmpdir } from "node:os";
 import { afterEach, describe, expect, it } from "vitest";
@@ -401,6 +401,32 @@ describe("Agent lifecycle", () => {
 
     finish({ output: "done", threadId: "thread", usage: null });
     await expect.poll(() => service.getRun(run.id).status).toBe("completed");
+  });
+
+  /**
+   * Delegation made the workspace write conditional, so both halves of that
+   * condition need pinning: a grant is policy the gateway reads from the store
+   * and must not rewrite AGENTS.md, while a rename is workspace content and
+   * must. Skipping the write for a rename would leave Codex running on stale
+   * instructions — a baseline regression no other test would notice.
+   */
+  it("regenerates workspace instructions for a rename but not for a grant change", async () => {
+    const service = await makeService();
+    const agent = await service.createAgent({
+      name: "Original",
+      toolGrants: ["model"],
+    });
+    const instructions = path.join(agent.workspacePath, "AGENTS.md");
+    const before = await readFile(instructions, "utf8");
+    expect(before).toContain("Original");
+
+    await service.updateAgent(agent.id, { toolGrants: ["model", "docs"] });
+    expect(await readFile(instructions, "utf8")).toBe(before);
+
+    await service.updateAgent(agent.id, { name: "Renamed" });
+    const after = await readFile(instructions, "utf8");
+    expect(after).toContain("Renamed");
+    expect(after).not.toBe(before);
   });
 
   it("persists a playground conversation", async () => {
