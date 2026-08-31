@@ -24,7 +24,7 @@ vulnerability this project removes. It appears below in red, struck through.
 ## The diagram
 
 ```mermaid
-flowchart LR
+flowchart TB
 
   HUMAN["Human user"]
 
@@ -45,9 +45,9 @@ flowchart LR
     subgraph GWBOX["★ AGENT ACCESS GATEWAY · /gateway/v1/* — VERIFIES ONLY"]
       direction TB
       G1["1 · authenticate<br/>JWT signature + live RunSession<br/><b>fail → 401</b>"]
-      G2["2 · resolve principal<br/>owner role ∩ Agent grants<br/><i>read live from the store</i>"]
-      G3["3 · can()<br/>tool RBAC + ownership<br/><b>fail → 403</b>"]
-      G4["4 · withinBudget()<br/>owner token ceiling<br/><b>fail → 402</b>"]
+      G2["2 · resolve principal<br/>owner role ∩ Agent grants<br/><i>read live from the store</i><br/><b>missing record → 403</b>"]
+      G3["3 · can()<br/>tool RBAC + ownership<br/><b>RBAC fail → 403<br/>ownership fail → 404 invisible</b>"]
+      G4["4 · withinBudget()<br/>owner token ceiling<br/><i>settled store + in-flight memory</i><br/><b>fail → 402</b>"]
       G5["5 · AuditLog<br/><b>written BEFORE the answer</b>"]
       G6["6 · inject ARK_API_KEY<br/>stream the reply through"]
       G1 --> G2 --> G3 --> G4 --> G5 --> G6
@@ -56,7 +56,7 @@ flowchart LR
     subgraph TOOLSVC["Mock tool service · /internal/tools/*"]
       direction TB
       T1["7 · gateway credential required<br/><b>fail → 401</b>"]
-      T2["8 · visibleTo(scope) re-derived<br/><b>fail → 404 invisible</b>"]
+      T2["8 · visibleTo(scope) re-derived<br/><b>missing scope → 400<br/>hidden doc → 404 · search row → filtered</b>"]
       T1 --> T2
     end
 
@@ -67,8 +67,8 @@ flowchart LR
     VAULT["🔑 ARK_API_KEY<br/>GATEWAY_JWT_SECRET<br/>GATEWAY_TOOL_CREDENTIAL"]
   end
 
-  subgraph RUNTIME["🔴 UNTRUSTED · Disposable container — Docker / Colima / Podman"]
-    CODEX["Codex CLI<br/>runs arbitrary shell · writes files<br/><b>holds RUN_JWT only</b><br/>✗ no ARK_API_KEY to steal"]
+  subgraph RUNTIME["🔴 UNTRUSTED · Runtime container"]
+    CODEX["Codex CLI · Docker / Colima / Podman<br/>runs arbitrary shell · writes files<br/><b>holds RUN_JWT only</b><br/>✗ no ARK_API_KEY to steal"]
   end
 
   ARK["Volcengine Ark<br/>Responses API"]
@@ -80,7 +80,8 @@ flowchart LR
   SVC --> RUNNER
   RUNNER -->|"3 · RUN_JWT by name, never in argv"| CODEX
   CODEX -->|"4 · EVERY model and tool call<br/>Authorization: Bearer RUN_JWT"| G1
-  G2 -.->|"reads role · grants · spend"| STORE
+  G2 -.-> STORE
+  G4 -.-> STORE
   G5 ==>|"one record per decision"| AUDIT
   VAULT -.-> G6
   G6 -->|"5 · Authorization: Bearer ARK_API_KEY"| ARK
@@ -112,6 +113,9 @@ flowchart LR
   style GWBOX fill:#eaf5ea,stroke:#82b366,stroke-width:4px
   style TOOLSVC fill:#eaf5ea,stroke:#82b366,stroke-width:2px
   style CP fill:#eef4fc,stroke:#6c8ebf,stroke-width:2px
+
+  linkStyle 23,24,25,26 stroke:#b85450,stroke-width:2px,color:#b85450
+  linkStyle 27 stroke:#b85450,stroke-width:4px,color:#b85450
 ```
 
 ---
