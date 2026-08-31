@@ -16,6 +16,11 @@ flowchart LR
     Gateway -->|injects the Ark key| Ark["Volcengine Ark"]
 ```
 
+That is the orientation view. For the trust boundaries, the numbered enforcement
+points, and what each one denies with, see
+[ARCHITECTURE_DIAGRAM.md](ARCHITECTURE_DIAGRAM.md) — the one-page diagram
+deliverable.
+
 ## Components
 
 ### Web UI

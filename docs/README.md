@@ -15,15 +15,22 @@ updated when behavior changes.
 
 ## Architecture And Operations
 
-| Doc                                      | Canonical for                            |
-| ---------------------------------------- | ---------------------------------------- |
-| [ARCHITECTURE.md](ARCHITECTURE.md)       | Component and extension boundaries       |
-| [DEPLOYMENT.md](DEPLOYMENT.md)           | ECS and Terraform deployment             |
-| [LOCAL_POC.md](LOCAL_POC.md)             | Docker, Colima, rootless Podman          |
-| [HACKATHON_BRIEF.md](HACKATHON_BRIEF.md) | Final challenge brief, rubric, checklist |
+| Doc                                                | Canonical for                            |
+| -------------------------------------------------- | ---------------------------------------- |
+| [ARCHITECTURE.md](ARCHITECTURE.md)                 | Component and extension boundaries       |
+| [ARCHITECTURE_DIAGRAM.md](ARCHITECTURE_DIAGRAM.md) | The one-page diagram deliverable         |
+| [DEPLOYMENT.md](DEPLOYMENT.md)                     | ECS and Terraform deployment             |
+| [LOCAL_POC.md](LOCAL_POC.md)                       | Docker, Colima, rootless Podman          |
+| [HACKATHON_BRIEF.md](HACKATHON_BRIEF.md)           | Final challenge brief, rubric, checklist |
 
 There is no root `ARCHITECTURE.md`; `docs/ARCHITECTURE.md` is the only
-architecture document. Do not create a second one.
+architecture _description_. Do not create a second one.
+
+[ARCHITECTURE_DIAGRAM.md](ARCHITECTURE_DIAGRAM.md) is not a second one. It is
+the hackathon's one-page diagram deliverable, canonical for the trust boundaries
+and the numbered enforcement points and for nothing else — it describes no
+component. `ARCHITECTURE.md` keeps the orientation diagram and the prose; this
+page changes only when a boundary or an enforcement point moves.
 
 ## Decisions And Designs
 
@@ -86,6 +93,8 @@ When behavior changes, update at minimum:
 
 - `docs/adr/` → a dated ADR with the decision and its consequences
 - `docs/specs/` → a design spec, if the design is non-trivial
+- `docs/ARCHITECTURE_DIAGRAM.md` → if it adds or moves an enforcement point,
+  an instrumentation point, or a trust boundary
 - `CLAUDE.md` → Invariants, Observability, and Architecture sections
 - `AGENTS.md` → review checklist, if reviewers need a new check
 - `README.md` → so a reviewer can actually run and see it

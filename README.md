@@ -286,7 +286,7 @@ flowchart LR
     API --> Runtime{"Runtime provider"}
     Runtime -->|Local POC| Container["Disposable Docker / Colima / Podman container"]
     Runtime -->|ECS profile| Codex["Codex CLI in application container"]
-    Container --> Gateway["Agent Access Gateway\nPOST /gateway/v1/responses"]
+    Container --> Gateway["Agent Access Gateway<br/>POST /gateway/v1/responses"]
     Codex --> Gateway
     Gateway -->|injects the Ark key| Ark["Volcengine Ark Responses API"]
 ```
