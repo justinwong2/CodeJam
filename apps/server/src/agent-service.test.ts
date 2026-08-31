@@ -98,6 +98,29 @@ async function settle(
   }
 }
 
+/**
+ * A runner that reports usage the way Codex actually does: cumulatively for the
+ * Agent's thread, so each turn's figure already contains every turn before it.
+ * Modelling this is the whole point — a runner reporting per-turn costs would
+ * let a sum over Runs look correct when it is not.
+ */
+function cumulativeRunner(perTurn = 100): AgentRunner {
+  const threadTotals = new Map<string, number>();
+  return {
+    run: async (request) => {
+      const next = (threadTotals.get(request.agentId) ?? 0) + perTurn;
+      threadTotals.set(request.agentId, next);
+      return {
+        output: "",
+        threadId: "thread-" + request.agentId,
+        usage: { inputTokens: next, outputTokens: 0 },
+      };
+    },
+    cancel: async () => false,
+    isAvailable: async () => true,
+  };
+}
+
 /** A runner that never finishes, so a run stays live while a test inspects it. */
 function pendingRunner(): {
   runner: AgentRunner;
@@ -439,5 +462,181 @@ describe("Documents", () => {
 
     expect(doc.ownerId).toBe("user-b");
     expect(service.findMockDoc(doc.id)?.ownerId).toBe("user-b");
+  });
+});
+
+describe("Owner token spend", () => {
+  it("counts nothing for a human with no completed Runs", async () => {
+    const service = await makeService();
+    expect(service.sumOwnerTokens(DEFAULT_OWNER_ID)).toBe(0);
+    // A human the store does not know is zero, not an error: a missing record
+    // must never be the reason a ceiling is skipped.
+    expect(service.sumOwnerTokens("user-ghost")).toBe(0);
+  });
+
+  it("sums every token a completed Run reported", async () => {
+    const service = await makeService();
+    const agent = await service.createAgent({ name: "Spender" });
+    const { run } = await service.sendMessage(agent.id, "do something");
+    await settle(service, run.id);
+
+    // FakeRunner reports 12 input and 5 output tokens for the turn.
+    expect(service.sumOwnerTokens(DEFAULT_OWNER_ID)).toBe(17);
+  });
+
+  it("accumulates across an owner's Runs and Agents, and only theirs", async () => {
+    const service = await makeService();
+    const mine = await service.createAgent({ name: "Mine" }, DEFAULT_OWNER_ID);
+    const also = await service.createAgent({ name: "Also" }, DEFAULT_OWNER_ID);
+    const theirs = await service.createAgent({ name: "Theirs" }, "user-b");
+
+    const runs = [
+      (await service.sendMessage(mine.id, "one")).run,
+      (await service.sendMessage(also.id, "two")).run,
+      (await service.sendMessage(theirs.id, "three")).run,
+    ];
+    await settle(service, ...runs.map((run) => run.id));
+
+    // Two Runs of this owner's, across two of their Agents.
+    expect(service.sumOwnerTokens(DEFAULT_OWNER_ID)).toBe(34);
+    // The third belongs to somebody else and must not be charged here.
+    expect(service.sumOwnerTokens("user-b")).toBe(17);
+  });
+
+  it("counts a thread's total once, not once per turn", async () => {
+    // The bug this guards: `RunUsage` is cumulative for the Codex thread, so
+    // three turns of 100 report 100, 200, 300 — and adding those gives 600 for
+    // 300 tokens of actual spend. Over-counting grows with the length of the
+    // conversation, which is exactly when a ceiling matters most.
+    const service = await makeService(cumulativeRunner(100));
+    const agent = await service.createAgent({ name: "Chatty" });
+    for (const prompt of ["one", "two", "three"]) {
+      const { run } = await service.sendMessage(agent.id, prompt);
+      await settle(service, run.id);
+    }
+
+    expect(service.sumOwnerTokens(DEFAULT_OWNER_ID)).toBe(300);
+  });
+
+  it("counts each Agent's thread separately", async () => {
+    const service = await makeService(cumulativeRunner(100));
+    const first = await service.createAgent({ name: "First" });
+    const second = await service.createAgent({ name: "Second" });
+    for (const agent of [first, second]) {
+      for (const prompt of ["one", "two"]) {
+        const { run } = await service.sendMessage(agent.id, prompt);
+        await settle(service, run.id);
+      }
+    }
+
+    // Two threads at 200 each. Threads are per Agent, so one Agent's total is
+    // never the other's baseline.
+    expect(service.sumOwnerTokens(DEFAULT_OWNER_ID)).toBe(400);
+  });
+
+  it("ignores cached input tokens, which are part of the input already", async () => {
+    // The upstream reports `total = input + output`, with cached nested inside
+    // the input details. Adding it as a third bucket counts most input twice.
+    const service = await makeService({
+      run: async () => ({
+        output: "",
+        threadId: "thread-1",
+        usage: {
+          inputTokens: 1_000,
+          cachedInputTokens: 900,
+          outputTokens: 50,
+        },
+      }),
+      cancel: async () => false,
+      isAvailable: async () => true,
+    });
+    const agent = await service.createAgent({ name: "Cached" });
+    const { run } = await service.sendMessage(agent.id, "one");
+    await settle(service, run.id);
+
+    expect(service.sumOwnerTokens(DEFAULT_OWNER_ID)).toBe(1_050);
+  });
+
+  it("counts a Run still in flight as nothing, because it has reported nothing", async () => {
+    // The gap the gateway's own meter exists to cover: usage is parsed when a
+    // Run finishes, so a Run spending right now is invisible to this sum.
+    const { runner, finish } = pendingRunner();
+    const service = await makeService(runner);
+    const agent = await service.createAgent({ name: "Busy" });
+    const { run } = await service.sendMessage(agent.id, "keep going");
+
+    expect(service.sumOwnerTokens(DEFAULT_OWNER_ID)).toBe(0);
+
+    finish({ output: "done", threadId: null, usage: { inputTokens: 90 } });
+    await settle(service, run.id);
+    expect(service.sumOwnerTokens(DEFAULT_OWNER_ID)).toBe(90);
+  });
+});
+
+describe("Resetting spend", () => {
+  it("forgets what was spent before the reset, and keeps the Runs", async () => {
+    const service = await makeService();
+    const agent = await service.createAgent({ name: "Spender" });
+    const { run } = await service.sendMessage(agent.id, "one");
+    await settle(service, run.id);
+    expect(service.sumOwnerTokens(DEFAULT_OWNER_ID)).toBe(17);
+
+    await service.updateUser(DEFAULT_OWNER_ID, { resetSpend: true });
+
+    // The allowance starts over…
+    expect(service.sumOwnerTokens(DEFAULT_OWNER_ID)).toBe(0);
+    // …but nothing was destroyed to make that true. A watermark forgets what
+    // counts, not what happened: the Run and its usage are still on record.
+    expect(service.getRun(run.id).usage).toEqual({
+      inputTokens: 12,
+      outputTokens: 5,
+    });
+    expect(service.findUser(DEFAULT_OWNER_ID)?.budgetResetAt).not.toBeNull();
+  });
+
+  it("counts only what a thread spent after the reset", async () => {
+    const service = await makeService(cumulativeRunner(100));
+    const agent = await service.createAgent({ name: "Spender" });
+    for (const prompt of ["one", "two", "three"]) {
+      const { run } = await service.sendMessage(agent.id, prompt);
+      await settle(service, run.id);
+    }
+    expect(service.sumOwnerTokens(DEFAULT_OWNER_ID)).toBe(300);
+
+    await service.updateUser(DEFAULT_OWNER_ID, { resetSpend: true });
+
+    for (const prompt of ["four", "five"]) {
+      const { run } = await service.sendMessage(agent.id, prompt);
+      await settle(service, run.id);
+    }
+
+    // The thread now reports 500 in total, but 300 of it was spent before the
+    // reset. Subtracting the figure standing at the watermark is what makes a
+    // reset survive the next turn — the thread total never goes back down.
+    expect(service.sumOwnerTokens(DEFAULT_OWNER_ID)).toBe(200);
+  });
+
+  it("resets one human's spend without touching another's", async () => {
+    const service = await makeService();
+    const mine = await service.createAgent({ name: "Mine" }, DEFAULT_OWNER_ID);
+    const theirs = await service.createAgent({ name: "Theirs" }, "user-b");
+    const runs = [
+      (await service.sendMessage(mine.id, "one")).run,
+      (await service.sendMessage(theirs.id, "two")).run,
+    ];
+    await settle(service, ...runs.map((run) => run.id));
+
+    await service.updateUser(DEFAULT_OWNER_ID, { resetSpend: true });
+
+    expect(service.sumOwnerTokens(DEFAULT_OWNER_ID)).toBe(0);
+    expect(service.sumOwnerTokens("user-b")).toBe(17);
+  });
+
+  it("leaves the ceiling alone — a reset forgives spend, not limits", async () => {
+    const service = await makeService();
+    const before = service.findUser("user-b")?.tokenBudget;
+    await service.updateUser("user-b", { resetSpend: true });
+    expect(service.findUser("user-b")?.tokenBudget).toBe(before);
+    expect(service.findUser("user-b")?.role).toBe("basic");
   });
 });
