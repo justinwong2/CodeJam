@@ -30,12 +30,13 @@ is what a created Agent's `ownerId` is stamped from; each Agent is labelled with
 its owner. A per-Run evidence panel in the Playground reads
 `GET /api/runs/:id/audit` alongside the Run polling and renders that Run's
 decisions, denials distinguished, beside its token usage. An Operator Console
-reads `GET /api/operator/{audit,sessions,docs}` and shows the same evidence
-across every Agent and Run, beside the run sessions (as claims — never the
-credential), the documents that exist with their titles, owners, and visibility
-(metadata — never content), and each human's role. Its two controls trigger
-endpoints that already exist: `POST /api/agents/:id/revoke` and
-`PATCH /api/users/:id`. A Documents panel is the fourth surface: it lists what
+reads `GET /api/operator/{audit,sessions,docs,spend}` and shows the same
+evidence across every Agent and Run, beside the run sessions (as claims — never
+the credential), the documents that exist with their titles, owners, and
+visibility (metadata — never content), and each human's role, token ceiling,
+and spend against it. Its controls trigger endpoints that already exist:
+`POST /api/agents/:id/revoke` and `PATCH /api/users/:id`, whose three fields are
+the role, the token ceiling, and a spend reset. A Documents panel is the fourth surface: it lists what
 `GET /api/docs` answered for the acting human — their own documents plus every
 public one, scoped server-side by the same predicate an Agent's search is scoped
 by — and uploads through `POST /api/docs`, where the server generates the id,
@@ -154,8 +155,9 @@ session is denied and logged but files no record. Records hold the tool, the
 and both text fields are masked and length-bounded on the way to the store. The
 operator reads a Run's trail at `GET /api/runs/:id/audit`, and every Run's at
 `GET /api/operator/audit`. Operator actions themselves — assigning a role,
-revoking a session — are not audited: a record belongs to a Run, and they have
-none (see [../SECURITY.md](../SECURITY.md)).
+setting a token ceiling, resetting spend, revoking a session — are not audited:
+a record belongs to a Run, and they have none (see
+[../SECURITY.md](../SECURITY.md)).
 
 `/gateway/*` sits outside the `/api/*` shared-token hook on purpose: the agent
 is a different principal from the browser operator. Because the origin depends

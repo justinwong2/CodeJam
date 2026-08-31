@@ -101,8 +101,9 @@ what chooses it — persisted in `localStorage` and attached by `api.ts` to ever
 request. Like the Run evidence panel, it displays and names; it decides nothing.
 
 The Operator Console is the third browser surface, and the same kind of thing:
-it reads the three `/api/operator/*` endpoints and triggers the two levers that
-already exist (revoke a session, assign a role). It is deliberately not gated by
+it reads the four `/api/operator/*` endpoints and triggers levers that already
+exist — `POST /api/agents/:id/revoke`, and `PATCH /api/users/:id` for the role,
+the token ceiling, and a spend reset. It is deliberately not gated by
 the `admin` role — mock auth makes role-gating an operator surface theater —
 and it enforces nothing. "Operator" is the surface; "admin" is only the role.
 
@@ -111,14 +112,18 @@ what `GET /api/docs` answered for the acting human and uploads through
 `POST /api/docs`. It filters nothing and chooses no owner — the server scopes the
 listing and stamps the owner, and switching the acting user simply asks again.
 
+Agent tool grants are the fifth: Create and Settings offer inheritance plus the
+tools that Agent's owner may actually delegate, sourced from `/api/users`'s
+server-owned `delegatableToolsByRole` rather than a hard-coded web list. Create
+and update accept `toolGrants: null | ToolName[]` — `null` inherits the owner's
+role, an explicit list is an Agent-level ceiling. Grant-only updates are allowed
+mid-run so the next gateway call sees them; workspace configuration edits stay
+`409` while busy. The browser submits the setting and decides nothing: the
+owner's role is still the ceiling, applied by `can()` on every call.
+
 The agent-facing gateway is separate and deliberately outside that hook —
 agents authenticate with their own per-run credential, which the control plane
 mints and can revoke:
-
-Agent create/update also accepts `toolGrants: null | ToolName[]`. `null`
-inherits the owner's role, while an explicit list is an Agent-level ceiling.
-Grant-only updates are allowed mid-run so the next gateway call sees them;
-workspace configuration edits remain blocked while busy.
 
 | Method | Path                        | Purpose                                                                                                             |
 | ------ | --------------------------- | ------------------------------------------------------------------------------------------------------------------- |

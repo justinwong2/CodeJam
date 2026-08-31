@@ -167,19 +167,25 @@ any client that is not this one.
   with a visibility chosen at creation. It filters nothing (the server scopes the
   listing with the same `visibleTo` an Agent's search is scoped by) and names no
   owner (the server stamps the acting human). Switching the acting user re-reads
-  the endpoint, which is the demonstration: one predicate, two callers.
+  the endpoint, which is the demonstration: the human listing and the Agent's
+  search are scoped by the same predicate, so they cannot disagree.
 - **Agent tool grants.** Create and Settings expose inheritance plus the tools
   the Agent's owner may actually delegate. Those choices come from
   `/api/users`'s server-owned `delegatableToolsByRole`, never a hard-coded web
-  list, so a basic owner never sees `payments`. The browser only submits the
-  setting; the gateway decides. **Apply tool grants** remains usable during a
+  list, so a basic owner is never offered `payments` as a new grant. A grant
+  already stored that the owner's **current** role denies is still rendered,
+  struck through: hiding it is how a save used to drop it, and the ceiling is
+  the server's to apply per call rather than the browser's to bake into stored
+  policy. Grants are submitted exactly as edited — the browser narrows nothing,
+  so a role narrowed and restored leaves the Agent's grants where they were.
+  **Apply tool grants** remains usable during a
   Run because policy changes are live, while identity and instruction edits
   remain blocked until the Run ends.
 
-`apps/web/src/types.ts` mirrors the server's `User`, `Role`, `AuditRecord`,
-`RunSessionClaims`, `MockDocMetadata`, `MockDoc`, `Visibility`, and
-`Agent.ownerId` / `Agent.toolGrants`. The server's `types.ts` is canonical;
-keep the two in sync.
+`apps/web/src/types.ts` mirrors the server's `User`, `Role`, `ToolName`,
+`AuditRecord`, `RunSessionClaims`, `MockDocMetadata`, `MockDoc`, `Visibility`,
+`OwnerSpend`, and `Agent.ownerId` / `Agent.toolGrants`. The server's `types.ts`
+is canonical; keep the two in sync.
 
 ## API Endpoints
 
@@ -462,9 +468,11 @@ These are load-bearing. Breaking one costs hackathon points directly:
     keep doing so. Tool-RBAC denials stay `403`: they name a tool, not a
     resource.
 13. **`visibleTo()` exists exactly once**, in `authz.ts`, and every caller
-    imports it — the gateway for a direct fetch, and the mock tool service for
-    both a scoped search and the single-document route. A second copy is how
-    search starts returning rows the fetch path hides. Scope travels in
+    imports it — `can()` itself for an ownership decision, the mock tool service
+    for both a scoped search and the single-document route, and
+    `AgentService.listVisibleDocuments` for the human's `GET /api/docs` listing.
+    A second copy is how search starts returning rows the fetch path hides, or
+    how the human listing starts disagreeing with the Agent's. Scope travels in
     `x-launchpad-scope`, is attached only by the gateway when forwarding, and a
     tool call missing it is refused — the document route included, which
     re-derives the gateway's ownership answer rather than trusting it. The two

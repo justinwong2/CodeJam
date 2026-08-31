@@ -146,7 +146,9 @@ asks the server, and shows what the server then says.
 Open an Agent's **Settings** to configure **Delegated gateway tools**. Keep
 **Inherit the owner role** checked for role-only behavior, or clear it and pick
 an explicit subset. The choices come from the server's current role table, so a
-basic owner never sees `payments` as something they could delegate. **Apply
+basic owner is never offered `payments` as a new grant — though a grant already
+stored that the owner's current role denies stays visible, struck through,
+rather than quietly disappearing. **Apply
 tool grants** works during a Run: remove
 `payments`, call it and observe a `403` plus one deny row; restore it and the
 same unexpired credential succeeds. The owner role remains the ceiling, so
