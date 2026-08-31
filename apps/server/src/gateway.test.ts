@@ -323,6 +323,42 @@ describe("Model gateway", () => {
     await app.close();
   });
 
+  it("names itself upstream as a Codex client, overriding the agent's own", async () => {
+    // Ark tolerates the tool entries Codex actually sends only when it reads
+    // `codex` in the User-Agent; without it every model call is a 400 before
+    // the model is reached. So the header is load-bearing rather than
+    // cosmetic. It is the gateway's to set, not the agent's to supply: this is
+    // the request carrying the platform's Ark key, and an agent that could
+    // choose the identity on it would be choosing how the upstream reads a
+    // call made on the platform's credential.
+    const upstream = await startEchoUpstream();
+    const session = liveSession();
+    const app = await createApp(
+      configFor(upstream.baseUrl),
+      serviceWith(session),
+    );
+
+    const response = await app.inject({
+      method: "POST",
+      url: "/gateway/v1/responses",
+      headers: {
+        "content-type": "application/json",
+        authorization: `Bearer ${credentialFor(session)}`,
+        "user-agent": "agent-chosen-identity/9.9",
+      },
+      payload: '{"model":"ep-test"}',
+    });
+
+    expect(response.statusCode).toBe(200);
+    const forwarded = upstream.calls[0]?.headers ?? {};
+    const userAgent = String(forwarded["user-agent"] ?? "");
+    // The substring is what Ark actually keys on, so that is what is pinned
+    // rather than the exact string, which is free to change.
+    expect(userAgent.toLowerCase()).toContain("codex");
+    expect(userAgent).not.toContain("agent-chosen-identity");
+    await app.close();
+  });
+
   it("files exactly one allow record, and files it before it answers", async () => {
     const upstream = await startEchoUpstream();
     const session = liveSession();

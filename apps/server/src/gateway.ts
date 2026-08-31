@@ -72,6 +72,29 @@ const HOP_BY_HOP_HEADERS = [
 // is replaced outright, and framing headers because fetch re-frames the body.
 const FORWARDED_REQUEST_HEADERS = new Set(["accept", "content-type"]);
 
+/**
+ * The gateway's own client identity upstream, set rather than forwarded.
+ *
+ * Ark inspects `User-Agent` for the case-insensitive substring `codex` and
+ * only then tolerates the tool entries Codex CLI actually sends — notably
+ * `{"type":"web_search","external_web_access":false}`, which it emits on every
+ * turn and no configuration in 0.111.0 removes. Without the match Ark
+ * validates strictly and answers `400 InvalidParameter: unknown field
+ * "external_web_access"`, so every model call fails before the model is
+ * reached.
+ *
+ * This is an undocumented vendor behaviour found by probing the live endpoint,
+ * not a contract: `originator` and `session_id` have no effect, and any UA
+ * containing the substring works. It is load-bearing until Codex can be told
+ * to stop advertising the tool. Do not remove it as a stray header.
+ *
+ * It is *set* here rather than added to the allowlist above on purpose. The
+ * agent controls the headers on its own gateway call, and this request is the
+ * one carrying the platform's Ark credential — so the identity travelling
+ * upstream has to be the gateway's, never the agent's.
+ */
+const UPSTREAM_USER_AGENT = "volc-agent-launchpad-gateway (codex)";
+
 // fetch has already decoded and re-framed the upstream body, so forwarding the
 // upstream's own framing headers would describe bytes we are no longer sending.
 const DROPPED_RESPONSE_HEADERS = new Set([
@@ -95,6 +118,9 @@ function upstreamHeaders(request: FastifyRequest, apiKey: string): Headers {
       headers.set(name, value);
     }
   }
+  // Set last, so neither loop above nor an agent-chosen header can displace
+  // the gateway's own identity on the request carrying the platform's key.
+  headers.set("user-agent", UPSTREAM_USER_AGENT);
   // The only place the Ark credential is ever attached to a request.
   headers.set("authorization", `Bearer ${apiKey}`);
   return headers;
