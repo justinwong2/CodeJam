@@ -74,7 +74,22 @@ the next call rather than at expiry — and applies
 one of those tools: `POST /gateway/v1/responses` runs `can(principal, "model")`
 before it forwards, which is what makes the `suspended` role (an empty grant
 list) total rather than tool-only — a suspended owner's Agent cannot spend model
-tokens either. Only on allow does the gateway replace the run credential with
+tokens either.
+
+An authorized model call is then checked against what its owner can afford.
+`withinBudget()` in `apps/server/src/budget.ts` — pure and synchronous like
+`can()` — compares the ceiling on `User.tokenBudget` against two ledgers: tokens
+reported by that owner's **completed** Runs, exact and read from the store, plus
+what their **in-flight** Runs have spent, estimated from request size by a meter
+the gateway keeps in memory. The estimate exists because reading real per-call
+usage would mean parsing the stream the gateway forwards untouched, and the
+in-flight half exists because a Run reports usage only once it has finished
+spending — a ceiling counting only completed Runs could never stop the Run that
+is looping right now. Over the ceiling is a `402`, distinct from `403` on
+purpose: "they may, but they cannot afford to" is a different fact from "they
+may not", and the order of the two checks keeps the coarser one first.
+
+Only on allow does the gateway replace the run credential with
 the Ark key and forward to `${ARK_BASE_URL}/responses`, streaming the upstream
 response through unmodified so server-sent events reach Codex as they arrive.
 The upstream key therefore never enters an Agent Runtime.

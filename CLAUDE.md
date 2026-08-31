@@ -75,6 +75,7 @@ apps/
       gateway.ts                  Agent Access Gateway: agent-facing proxy routes
       run-jwt.ts                  HS256 sign/verify for per-run credentials
       authz.ts                    can(): the pure authorization decision
+      budget.ts                   withinBudget(): the pure spend decision
       audit.ts                    AuditLog: one redacted record per decision
       mock-tools.ts               docs/search/payments the gateway forwards to
   web/           React 19 + Vite UI (@launchpad/web)
@@ -145,13 +146,18 @@ any client that is not this one.
   reason — with denials visually distinct, beside the Run's token usage. It
   never derives a decision, and shows an empty state rather than inventing one.
 - **Operator Console.** A second view in `App.tsx`, reached from the sidebar. It
-  reads `GET /api/operator/{audit,sessions,docs}` on a three-second tick and
-  renders four tables: the decision feed across every Agent and Run (denials
+  reads `GET /api/operator/{audit,sessions,docs,spend}` on a three-second tick
+  and renders four tables: the decision feed across every Agent and Run (denials
   distinct, newest first), run sessions **as claims** with a Revoke button on
   the live ones, the ground-truth document table (metadata only), and a role
-  dropdown per human. Its two levers are the existing
-  `POST /api/agents/:id/revoke` and `PATCH /api/users/:id` — it triggers them
-  and displays what the store then says. It decides nothing, and it is
+  dropdown, spend-against-ceiling readout, token-budget input, and Reset-spend
+  button per human. The readout shows settled and in-flight spend as two
+  figures rather than one total, because one is measured and the other
+  estimated. Its levers are
+  the existing `POST /api/agents/:id/revoke` and `PATCH /api/users/:id`'s three
+  fields — it triggers them and displays what the store then says. The budget input commits
+  on blur rather than per keystroke, because each change is a store write the
+  next gateway call reads. It decides nothing, and it is
   deliberately **not** gated by the `admin` role: mock authentication makes
   role-gating an operator surface theater. Use "operator" for the surface and
   "admin" only for the role.
@@ -180,10 +186,11 @@ All under `/api`. Auth is a single optional shared bearer token
 | GET    | `/api/users`               | Seeded users for the dev switcher       |
 | GET    | `/api/docs`                | Documents the acting human may see      |
 | POST   | `/api/docs`                | Upload `{ title, content, visibility }` |
-| PATCH  | `/api/users/:id`           | Assign a seeded role: `{ role }`        |
+| PATCH  | `/api/users/:id`           | Operator: role, budget, reset spend     |
 | GET    | `/api/operator/audit`      | Every Run's decisions, by `ts`          |
 | GET    | `/api/operator/sessions`   | Run sessions as claims, newest first    |
 | GET    | `/api/operator/docs`       | Document metadata, never content        |
+| GET    | `/api/operator/spend`      | Per-human spend against the ceiling     |
 | GET    | `/api/agents`              | List Agents                             |
 | POST   | `/api/agents`              | Create an Agent                         |
 | GET    | `/api/agents/:id`          | Get one Agent                           |
@@ -204,15 +211,36 @@ authentication by design — the middleware being scored is authorization — an
 it decides which user a newly created Agent is owned by. The web app's half of
 it is the dev user switcher in `api.ts` (see Web UI below).
 
-`PATCH /api/users/:id` accepts exactly `{ role }`, one of `admin`, `basic`, or
-`suspended` — assigning roles is in scope, authoring them is not, so any other
-value is a `400` and an unknown user is a `404`. It takes effect on that
-human's Agents' **next** gateway call, with no token event of any kind, because
-permissions are read from the store per call and were never in the credential.
-The three `/api/operator/*` reads are the Operator Console's data: the whole
+`PATCH /api/users/:id` is the operator's lever over one human, and accepts
+`{ role?, tokenBudget? }` — at least one, and nothing else. `role` is one of
+`admin`, `basic`, or `suspended`: assigning roles is in scope, authoring them is
+not, so any other value is a `400`. `tokenBudget` is a non-negative whole number
+of tokens, `0` for unlimited; a negative or fractional value is a `400`.
+`resetSpend` is the literal `true` and nothing else — it forgets what the human
+has spent without touching what they may spend. An unknown user is a `404`. Either change takes effect on that human's Agents'
+**next** gateway call, with no token event of any kind, because both are read
+from the store per call and neither was ever in the credential.
+
+`tokenBudget` is deliberately on **no owner-facing route**. An Agent's owner can
+spend their allowance but cannot raise it, for the same reason a role is not
+carried in a run credential — a ceiling its subject can lift is not a ceiling.
+
+`resetSpend` is an **action, not a timestamp**: the server decides when the
+reset happened, so a caller cannot forgive spend selectively or retroactively.
+It sets `User.budgetResetAt`, after which `sumOwnerTokens` counts only Runs
+completed later — a watermark, never a deletion, so the Runs, their `usage`, and
+their audit records all survive a reset intact. The route then clears that
+owner's in-flight meters in `gateway.ts`, because settled spend is the store's
+to forget while a live Run's spend is the gateway's; clearing one without the
+other would make "reset" mean "reset once the current Run has finished".
+The four `/api/operator/*` reads are the Operator Console's data: the whole
 decision timeline, sessions projected to their claims (the raw credential is in
-no payload), and document metadata — id, title, owner, visibility — without
-content.
+no payload), document metadata — id, title, owner, visibility — without
+content, and each human's spend against their ceiling. That last one is a
+**view, not a record**: nothing stores it. It is assembled at the boundary
+because its halves live apart — settled spend is the store's, in-flight spend
+is the gateway's — and it keeps them as two fields rather than one total, since
+one is measured and the other estimated.
 
 The two `/api/docs` routes are the human half of the document surface.
 `GET` answers with the documents the acting human may see, scoped by the same
@@ -227,10 +255,10 @@ The Agent Access Gateway adds an **agent-facing** surface under `/gateway`.
 It is deliberately outside the `/api/*` auth hook: agents authenticate with
 their own run credential (`RUN_JWT`), not the browser's shared demo token.
 
-| Method | Path                        | Purpose                                                                                      |
-| ------ | --------------------------- | -------------------------------------------------------------------------------------------- |
-| POST   | `/gateway/v1/responses`     | Model proxy: verifies the run session, applies `can()`, injects the Ark key, streams through |
-| ALL    | `/gateway/v1/tools/:tool/*` | Tool proxy: verifies the run session, resolves the principal, applies `can()`, then forwards |
+| Method | Path                        | Purpose                                                                                                             |
+| ------ | --------------------------- | ------------------------------------------------------------------------------------------------------------------- |
+| POST   | `/gateway/v1/responses`     | Model proxy: verifies the run session, applies `can()` and the owner's budget, injects the Ark key, streams through |
+| ALL    | `/gateway/v1/tools/:tool/*` | Tool proxy: verifies the run session, resolves the principal, applies `can()`, then forwards                        |
 
 `:tool` is `docs`, `search`, or `payments`; anything else is a `403`. The proxy
 forwards to the mock tool service at `/internal/tools/*`, which accepts only
@@ -255,11 +283,13 @@ When adding an endpoint, update this table **and** the one in
 5. Codex calls `POST /gateway/v1/responses` on this server — not Ark directly.
    The gateway verifies the credential against its `RunSession` (signature,
    expiry, `revoked`), resolves the `Principal` from the Agent's current owner
-   and runs `can(principal, "model")`, then swaps the credential for the Ark key
-   and streams the upstream reply back unmodified. Anything unverifiable is a
-   `401` and any role that does not grant `model` is a `403`, both with no
-   upstream call — so a `suspended` owner's Agent cannot spend tokens either.
-   Codex may also write files and run commands in the Agent's workspace.
+   and runs `can(principal, "model")`, checks the owner's token budget, then
+   swaps the credential for the Ark key and streams the upstream reply back
+   unmodified. Anything unverifiable is a `401`, any role that does not grant
+   `model` is a `403`, and an owner with no allowance left is a `402` — none of
+   them with an upstream call, so neither a `suspended` owner's Agent nor a
+   spent-out one can burn tokens. Codex may also write files and run commands in
+   the Agent's workspace.
 6. A tool call goes to `/gateway/v1/tools/:tool/*` instead. The gateway verifies
    the same credential, then resolves the `Principal` from the Agent's **current
    owner** in the store — permissions are never in the token — and runs
@@ -392,6 +422,14 @@ These are load-bearing. Breaking one costs hackathon points directly:
     search. A second copy is how search starts returning rows the fetch path
     hides. Scope travels in `x-launchpad-scope`, is attached only by the gateway
     when forwarding, and a tool call missing it is refused.
+14. **A spent-out owner's model call is refused before it is made.** The budget
+    is checked after `can()` and before the forward, so a refusal is a `402`
+    with one audit `deny` row and **no upstream request** — a refused call costs
+    nothing and is charged nothing. In-flight spend counts, or a Run that is
+    looping right now could never be stopped. `gateway.test.ts` asserts both
+    halves — the `402` _and_ the absent upstream call — and must keep asserting
+    both. `tokenBudget` is reachable only through `PATCH /api/users/:id`: put it
+    on an owner-facing route and the ceiling stops being one.
 
 ## Security And Data Handling
 
@@ -426,7 +464,7 @@ npm run test        # Vitest, server workspace
 ```
 
 Tests live beside sources as `*.test.ts`. Current suites cover `agent-service`,
-`app`, `audit`, `authz`, `config`, `gateway`, `mock-tools`, `run-jwt`, `store`,
+`app`, `audit`, `authz`, `budget`, `config`, `gateway`, `mock-tools`, `run-jwt`, `store`,
 `codex-runner`, `container-codex-runner`, and the runner spawn environments.
 
 **Platform note:** `config.ts` calls `path.resolve` on every path, so resolved

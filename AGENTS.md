@@ -62,6 +62,7 @@ Summary — canonical list is in [CLAUDE.md](CLAUDE.md#invariants-to-preserve).
 | `apps/server/src/gateway.ts`                | Agent Access Gateway routes     |
 | `apps/server/src/run-jwt.ts`                | Per-run credential sign/verify  |
 | `apps/server/src/authz.ts`                  | `can()`, roles, ownership rule  |
+| `apps/server/src/budget.ts`                 | `withinBudget()`, spend rule    |
 | `apps/server/src/audit.ts`                  | Redacted record per decision    |
 | `apps/server/src/mock-tools.ts`             | docs/search/payments downstream |
 | `apps/web/src/App.tsx`                      | Entire UI (display-only)        |
@@ -74,7 +75,7 @@ including the operator's kill switch:
 | Method | Path                     | Purpose                                           |
 | ------ | ------------------------ | ------------------------------------------------- |
 | GET    | `/api/users`             | Seeded users for the dev user switcher            |
-| PATCH  | `/api/users/:id`         | Assign a seeded role: `{ role }`; 404 / 400       |
+| PATCH  | `/api/users/:id`         | Operator: role / budget / reset; 404 / 400        |
 | POST   | `/api/agents/:id/revoke` | Revoke the Agent's live run sessions mid-run      |
 | GET    | `/api/docs`              | Documents the acting human may see (own + public) |
 | POST   | `/api/docs`              | Upload: `{ title, content, visibility }`, 201     |
@@ -82,6 +83,7 @@ including the operator's kill switch:
 | GET    | `/api/operator/audit`    | Every Run's decisions in one feed, by `ts`        |
 | GET    | `/api/operator/sessions` | Run sessions as claims — never the credential     |
 | GET    | `/api/operator/docs`     | Document metadata — id, title, owner, visibility  |
+| GET    | `/api/operator/spend`    | Per-human settled + in-flight spend, and ceiling  |
 
 Browser requests name the acting human with `x-launchpad-user` (a seeded user
 id; `user-a` when absent, `400` when unknown). It sets a created Agent's
@@ -104,10 +106,10 @@ The agent-facing gateway is separate and deliberately outside that hook —
 agents authenticate with their own per-run credential, which the control plane
 mints and can revoke:
 
-| Method | Path                        | Purpose                                                                                      |
-| ------ | --------------------------- | -------------------------------------------------------------------------------------------- |
-| POST   | `/gateway/v1/responses`     | Model proxy: verifies the run session, applies `can()`, injects the Ark key, streams through |
-| ALL    | `/gateway/v1/tools/:tool/*` | Tool proxy: verifies the run session, resolves the principal, applies `can()`, then forwards |
+| Method | Path                        | Purpose                                                                                                             |
+| ------ | --------------------------- | ------------------------------------------------------------------------------------------------------------------- |
+| POST   | `/gateway/v1/responses`     | Model proxy: verifies the run session, applies `can()` and the owner's budget, injects the Ark key, streams through |
+| ALL    | `/gateway/v1/tools/:tool/*` | Tool proxy: verifies the run session, resolves the principal, applies `can()`, then forwards                        |
 
 `:tool` is `docs`, `search`, or `payments`. The role comes from the Agent's
 current owner in the store, never from the token, so a denial is a `403` and
