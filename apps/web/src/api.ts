@@ -5,6 +5,7 @@ import type {
   Message,
   MockDoc,
   MockDocMetadata,
+  OwnerSpend,
   Role,
   RunSessionClaims,
   SystemInfo,
@@ -159,10 +160,21 @@ export const api = {
     request<{ sessions: RunSessionClaims[] }>("/api/operator/sessions"),
   operatorDocs: () =>
     request<{ docs: MockDocMetadata[] }>("/api/operator/docs"),
+  operatorSpend: () => request<{ spend: OwnerSpend[] }>("/api/operator/spend"),
   setUserRole: (id: string, role: Role) =>
     request<{ user: User }>("/api/users/" + id, {
       method: "PATCH",
       body: JSON.stringify({ role }),
+    }),
+  setUserTokenBudget: (id: string, tokenBudget: number) =>
+    request<{ user: User }>("/api/users/" + id, {
+      method: "PATCH",
+      body: JSON.stringify({ tokenBudget }),
+    }),
+  resetUserSpend: (id: string) =>
+    request<{ user: User }>("/api/users/" + id, {
+      method: "PATCH",
+      body: JSON.stringify({ resetSpend: true }),
     }),
   revokeAgentSessions: (id: string) =>
     request<{ revokedSessions: number }>("/api/agents/" + id + "/revoke", {

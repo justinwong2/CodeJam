@@ -1517,6 +1517,54 @@ textarea:focus {
   cursor: pointer;
 }
 
+.console-table .budget-input {
+  width: 104px;
+  height: 28px;
+  padding: 0 8px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: white;
+  color: var(--ink);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11px;
+  text-align: right;
+}
+
+.console-table .budget-hint {
+  margin-left: 8px;
+  color: #6f7068;
+  font-size: 10px;
+}
+
+.console-table .budget-reset {
+  margin-left: 10px;
+}
+
+.console-table .spend {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.console-table .spend-used {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11px;
+}
+
+.console-table .spend-over {
+  color: var(--deny, #b23c3c);
+  font-weight: 600;
+}
+
+.console-table .spend-detail {
+  color: #6f7068;
+  font-size: 10px;
+}
+
+.console-table .spend-idle {
+  color: #9a9b93;
+}
+
 .console-empty {
   color: var(--muted);
   font-style: italic;
