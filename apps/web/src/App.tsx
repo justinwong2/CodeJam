@@ -110,6 +110,11 @@ function ToolGrantEditor({
   disabled?: boolean;
 }) {
   const inherited = value === null;
+  // A grant outside the owner's current role is still stored policy: the server
+  // intersects role and grants on every call, so a narrowed role hides what an
+  // Agent was delegated without erasing it. Rendering only the ceiling would
+  // make the editor invisibly drop the grants it could not show.
+  const shown = [...new Set([...availableTools, ...(value ?? [])])];
   return (
     <fieldset className="tool-grants" disabled={disabled}>
       <legend>Delegated gateway tools</legend>
@@ -124,24 +129,36 @@ function ToolGrantEditor({
         Inherit the owner role
       </label>
       <div className="tool-grant-options">
-        {availableTools.map((tool) => (
-          <label key={tool}>
-            <input
-              type="checkbox"
-              checked={inherited || value.includes(tool)}
-              disabled={disabled || inherited}
-              onChange={(event) => {
-                const current = value ?? [];
-                onChange(
-                  event.target.checked
-                    ? [...current, tool]
-                    : current.filter((item) => item !== tool),
-                );
-              }}
-            />
-            {tool}
-          </label>
-        ))}
+        {shown.map((tool) => {
+          const withinCeiling = availableTools.includes(tool);
+          return (
+            <label
+              key={tool}
+              className={withinCeiling ? undefined : "grant-above-ceiling"}
+              title={
+                withinCeiling
+                  ? undefined
+                  : "Delegated to this Agent, but the owner's current role denies it"
+              }
+            >
+              <input
+                type="checkbox"
+                checked={inherited || value.includes(tool)}
+                disabled={disabled || inherited}
+                onChange={(event) => {
+                  const current = value ?? [];
+                  onChange(
+                    event.target.checked
+                      ? [...current, tool]
+                      : current.filter((item) => item !== tool),
+                  );
+                }}
+              />
+              {tool}
+              {withinCeiling ? null : <span aria-hidden="true">🚫</span>}
+            </label>
+          );
+        })}
       </div>
       <small>
         The owner&apos;s current role is always the ceiling. These grants can
@@ -873,13 +890,10 @@ export default function App() {
     return role ? (delegatableToolsByRole[role] ?? []) : [];
   };
 
-  const visibleToolGrants = (
-    value: ToolName[] | null,
-    ownerId: string,
-  ): ToolName[] | null =>
-    value === null
-      ? null
-      : value.filter((tool) => availableToolsFor(ownerId).includes(tool));
+  // Grants are sent exactly as edited. The owner's role is a ceiling the server
+  // applies on every call, not something the browser may bake into the stored
+  // policy: filtering here would turn a reversible role change into a permanent
+  // rewrite, so a narrowed-then-restored role would never get its grants back.
 
   // Only ever show evidence belonging to the Run on screen, so switching Runs
   // cannot leave one Run's decisions filed under another's name.
@@ -1004,10 +1018,7 @@ export default function App() {
     setBusy(true);
     setError(null);
     try {
-      const { agent } = await api.createAgent({
-        ...form,
-        toolGrants: visibleToolGrants(form.toolGrants, actingUser),
-      });
+      const { agent } = await api.createAgent(form);
       await refreshAgents();
       setSelectedId(agent.id);
       setShowCreate(false);
@@ -1025,10 +1036,7 @@ export default function App() {
     setBusy(true);
     setError(null);
     try {
-      await api.updateAgent(selected.id, {
-        ...form,
-        toolGrants: visibleToolGrants(form.toolGrants, selected.ownerId),
-      });
+      await api.updateAgent(selected.id, form);
       await refreshAgents();
       setShowSettings(false);
     } catch (reason) {
@@ -1043,9 +1051,7 @@ export default function App() {
     setBusy(true);
     setError(null);
     try {
-      await api.updateAgent(selected.id, {
-        toolGrants: visibleToolGrants(form.toolGrants, selected.ownerId),
-      });
+      await api.updateAgent(selected.id, { toolGrants: form.toolGrants });
       await refreshAgents();
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : String(reason));

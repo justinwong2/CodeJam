@@ -693,6 +693,14 @@ textarea:focus {
   margin: 11px 0;
 }
 
+/* Delegated to the Agent, but denied by the owner's role right now. Shown
+   rather than hidden: it is stored policy, and it comes back if the role does. */
+.grant-above-ceiling {
+  opacity: 0.65;
+  text-decoration: line-through;
+  text-decoration-color: #b4b0a4;
+}
+
 .tool-grants small {
   color: var(--muted);
   font-size: 9px;
