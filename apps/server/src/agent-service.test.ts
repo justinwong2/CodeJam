@@ -291,6 +291,33 @@ describe("Run sessions", () => {
     );
   });
 
+  it("keeps the last failure report through a grant change and clears it on a workspace edit", async () => {
+    const service = await makeService({
+      run: async () => {
+        throw new Error("runner exploded");
+      },
+      cancel: async () => false,
+      isAvailable: async () => true,
+    });
+    const agent = await service.createAgent({ name: "Broken" });
+    const { run } = await service.sendMessage(agent.id, "fail");
+    await expect.poll(() => service.getRun(run.id).status).toBe("failed");
+    expect(service.getAgent(agent.id).lastError).toContain("runner exploded");
+
+    // A delegation change answers a policy question, so the Agent stays in
+    // error with the reason it earned rather than being quietly absolved.
+    const regranted = await service.updateAgent(agent.id, {
+      toolGrants: ["model"],
+    });
+    expect(regranted.status).toBe("error");
+    expect(regranted.lastError).toContain("runner exploded");
+
+    // Editing what the Agent is dismisses it, which is the pre-existing
+    // behavior this narrowing must not change.
+    const renamed = await service.updateAgent(agent.id, { name: "Repaired" });
+    expect(renamed.lastError).toBeNull();
+  });
+
   it("revokes sessions a restart left behind", async () => {
     const root = await temporaryRoot();
     const first = pendingRunner();

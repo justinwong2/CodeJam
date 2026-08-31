@@ -298,7 +298,11 @@ export class AgentService implements GatewayDirectory {
         agent.toolGrants =
           input.toolGrants === null ? null : [...input.toolGrants];
       }
-      agent.lastError = null;
+      // Editing what the Agent *is* dismisses the last failure report, on the
+      // assumption the edit is the response to it. Changing what the Agent may
+      // *reach* is not: a delegation change answers a policy question, not a
+      // failed Run, and it is now the one update allowed to land mid-Run.
+      if (changesWorkspace) agent.lastError = null;
       agent.updatedAt = now();
       return structuredClone(agent);
     });
