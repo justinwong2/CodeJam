@@ -1,6 +1,6 @@
 ---
 name: document
-description: Analyze and update this repository's documentation layers (README, CLAUDE.md, AGENTS.md, docs/, ADRs, specs) following its established patterns and drift-control rules. Use when documenting a middleware capability, adding an endpoint or env var, recording a design decision, or checking which docs a change made stale.
+description: Analyze and update this repository's documentation layers (README, AGENTS.md, AGENTS.md, docs/, ADRs, specs) following its established patterns and drift-control rules. Use when documenting a middleware capability, adding an endpoint or env var, recording a design decision, or checking which docs a change made stale.
 ---
 
 # Document (Volc Agent Launchpad)
@@ -10,7 +10,7 @@ project's actual documentation layers and drift-control rules, so proposals land
 in the right files instead of generic ones.
 
 > This skill is committed to the repository and loads automatically for anyone
-> who opens it in Claude Code. It overrides any personal `document` skill while
+> who opens it in Codex. It overrides any personal `document` skill while
 > working in this repo.
 
 ## Usage
@@ -30,7 +30,7 @@ proposing anything — it holds the drift-control rules this skill enforces.
 
 | Layer                 | Files                                                             | Canonical for                                                   |
 | --------------------- | ----------------------------------------------------------------- | --------------------------------------------------------------- |
-| 1. Root guides        | `README.md`, `CLAUDE.md`, `AGENTS.md`                             | Quick start; agent implementation guide; condensed review rules |
+| 1. Root guides        | `README.md`, `AGENTS.md`, `AGENTS.md`                             | Quick start; agent implementation guide; condensed review rules |
 | 2. Index              | `docs/README.md`                                                  | What is current, what is archived, drift control                |
 | 3. Architecture & ops | `docs/ARCHITECTURE.md`, `docs/DEPLOYMENT.md`, `docs/LOCAL_POC.md` | System shape, deploy paths, container engines                   |
 | 4. Decisions          | `docs/adr/YYYY-MM-DD-*.md`                                        | What we chose and why                                           |
@@ -45,9 +45,9 @@ proposing anything — it holds the drift-control rules this skill enforces.
   Prettier already ignores them.
 - **Do not create a root `ARCHITECTURE.md`.** `docs/ARCHITECTURE.md` is the only
   architecture doc; a second one guarantees drift.
-- **`CLAUDE.md` beats `AGENTS.md`.** When they disagree, `AGENTS.md` is the bug.
+- **`AGENTS.md` beats `AGENTS.md`.** When they disagree, `AGENTS.md` is the bug.
 - **`.env.example` is canonical** for the full variable list. `README.md` and
-  `CLAUDE.md` carry summary tables that must stay consistent with it.
+  `AGENTS.md` carry summary tables that must stay consistent with it.
 - **No secrets in any doc**, including examples, screenshots, and demo
   transcripts. This is an explicit hackathon acceptance-checklist item and is
   enforced by gitleaks in CI.
@@ -63,7 +63,7 @@ Exclude from discovery: `node_modules/`, `dist/`, `coverage/`, `workspaces/`,
    drift rules.
 2. Enumerate `.md` files, excluding the paths above.
 3. Compare documentation against code reality. Check specifically:
-   - Does the API table in `CLAUDE.md` match the routes in
+   - Does the API table in `AGENTS.md` match the routes in
      `apps/server/src/app.ts`?
    - Does the config table match `apps/server/src/config.ts` and `.env.example`?
    - Do the commands listed match `package.json` scripts?
@@ -84,21 +84,21 @@ call.
 
 Apply the matching drift-control checklist:
 
-- **New endpoint** → `CLAUDE.md` API table, `AGENTS.md` repo map if ownership
+- **New endpoint** → `AGENTS.md` API table, `AGENTS.md` repo map if ownership
   shifts, `docs/ARCHITECTURE.md` if flow changes, plus auth/validation tests.
 - **New env var** → `.env.example` (with a comment), `README.md` config table,
-  `CLAUDE.md` config table, `docs/DEPLOYMENT.md` if operators set it.
-- **New middleware capability** → an ADR, a spec if non-trivial, `CLAUDE.md`
+  `AGENTS.md` config table, `docs/DEPLOYMENT.md` if operators set it.
+- **New middleware capability** → an ADR, a spec if non-trivial, `AGENTS.md`
   invariants + observability, `AGENTS.md` review checklist, `README.md` so a
   reviewer can run it, and tests including the failure case.
-- **Schema change** → keep both `types.ts` files in sync, update `CLAUDE.md`
+- **Schema change** → keep both `types.ts` files in sync, update `AGENTS.md`
   data flow, update store tests.
 - **Agent authorization-policy change** → update `CONTEXT.md` terminology,
   `docs/ARCHITECTURE.md` check order, the gateway design's amendment log,
   `SECURITY.md` failure behavior, and tests proving both denial and no forward.
   Permissions stay out of run credentials; owner roles remain the ceiling over
   per-Agent tool grants.
-- **Redaction/data handling** → `SECURITY.md`, `CLAUDE.md` security section,
+- **Redaction/data handling** → `SECURITY.md`, `AGENTS.md` security section,
   `AGENTS.md` checklist, redaction tests.
 
 ### 3. `/document adr: <decision>` — draft a decision record

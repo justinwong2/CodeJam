@@ -27,10 +27,11 @@ architecture document. Do not create a second one.
 
 ## Decisions And Designs
 
-| Path             | Purpose                                               |
-| ---------------- | ----------------------------------------------------- |
-| [adr/](adr/)     | Architecture decision records — what we chose and why |
-| [specs/](specs/) | Feature design specs — how a capability will be built |
+| Path               | Purpose                                                                        |
+| ------------------ | ------------------------------------------------------------------------------ |
+| [adr/](adr/)       | Architecture decision records — what we chose and why                          |
+| [specs/](specs/)   | Feature design specs — how a capability will be built                          |
+| [issues/](issues/) | Implementation slices — grabbable tracer-bullet work items derived from a spec |
 
 The ADR recording our middleware direction is a **scored artifact**: the rubric
 allocates 25% to "clear rationale, coherent architecture, appropriate

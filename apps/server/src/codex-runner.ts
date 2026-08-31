@@ -1,8 +1,9 @@
 import { execFile } from "node:child_process";
 import { spawn, type ChildProcess } from "node:child_process";
 import { promisify } from "node:util";
-import type { AppConfig } from "./config.js";
+import { writeCodexConfig, type AppConfig } from "./config.js";
 import { RunCancelledError } from "./errors.js";
+import { gatewayBaseUrl, RUN_JWT_ENV_KEY } from "./gateway.js";
 import type {
   AgentRunner,
   RunUsage,
@@ -94,6 +95,40 @@ export function parseCodexEventLine(line: string, parsed: ParsedEvents): void {
   }
 }
 
+/**
+ * The Codex process environment. It carries the run credential the gateway
+ * expects and never the upstream Ark key, which stays in the server process.
+ * `runJwt` is omitted for probes such as `codex --version`, which call no model.
+ */
+export function buildCodexEnvironment(
+  config: AppConfig,
+  runJwt?: string,
+): NodeJS.ProcessEnv {
+  const inheritedNames = [
+    "PATH",
+    "HOME",
+    "TMPDIR",
+    "LANG",
+    "LC_ALL",
+    "SSL_CERT_FILE",
+    "SSL_CERT_DIR",
+    "HTTP_PROXY",
+    "HTTPS_PROXY",
+    "NO_PROXY",
+    "NODE_EXTRA_CA_CERTS",
+    "TERM",
+  ] as const;
+  const environment: NodeJS.ProcessEnv = {
+    CODEX_HOME: config.codexHome,
+    ...(runJwt ? { [RUN_JWT_ENV_KEY]: runJwt } : {}),
+    NO_COLOR: "1",
+  };
+  for (const name of inheritedNames) {
+    if (process.env[name] !== undefined) environment[name] = process.env[name];
+  }
+  return environment;
+}
+
 export class CodexRunner implements AgentRunner {
   private readonly active = new Map<
     string,
@@ -107,7 +142,23 @@ export class CodexRunner implements AgentRunner {
     }
   >();
 
-  constructor(private readonly config: AppConfig) {}
+  private readonly codexConfigReady: Promise<void>;
+
+  constructor(private readonly config: AppConfig) {
+    // Codex on this host reaches the gateway over loopback.
+    this.codexConfigReady = writeCodexConfig(config, {
+      baseUrl: gatewayBaseUrl("127.0.0.1", config.port),
+      envKey: RUN_JWT_ENV_KEY,
+    });
+    // Surface a write failure when a run needs the file, not as an unhandled
+    // rejection at some unrelated moment.
+    this.codexConfigReady.catch(() => {});
+  }
+
+  /** Resolves once this runner's config.toml is on disk; rejects if it failed. */
+  async ensureCodexConfig(): Promise<void> {
+    await this.codexConfigReady;
+  }
 
   async isAvailable(): Promise<boolean> {
     try {
@@ -136,11 +187,12 @@ export class CodexRunner implements AgentRunner {
     if (this.active.has(request.agentId)) {
       throw new Error("Agent already has an active Codex process");
     }
+    await this.ensureCodexConfig();
 
     const args = buildCodexArgs(request, this.config.codexSandboxMode);
     const child = spawn(this.config.codexBin, args, {
       cwd: request.workspacePath,
-      env: this.childEnvironment(),
+      env: this.childEnvironment(request.runJwt),
       stdio: ["ignore", "pipe", "pipe"],
     });
     const settled = new Promise<void>((resolve) => {
@@ -254,30 +306,7 @@ export class CodexRunner implements AgentRunner {
     }
   }
 
-  private childEnvironment(): NodeJS.ProcessEnv {
-    const inheritedNames = [
-      "PATH",
-      "HOME",
-      "TMPDIR",
-      "LANG",
-      "LC_ALL",
-      "SSL_CERT_FILE",
-      "SSL_CERT_DIR",
-      "HTTP_PROXY",
-      "HTTPS_PROXY",
-      "NO_PROXY",
-      "NODE_EXTRA_CA_CERTS",
-      "TERM",
-    ] as const;
-    const environment: NodeJS.ProcessEnv = {
-      CODEX_HOME: this.config.codexHome,
-      ARK_API_KEY: this.config.arkApiKey,
-      NO_COLOR: "1",
-    };
-    for (const name of inheritedNames) {
-      if (process.env[name] !== undefined)
-        environment[name] = process.env[name];
-    }
-    return environment;
+  private childEnvironment(runJwt?: string): NodeJS.ProcessEnv {
+    return buildCodexEnvironment(this.config, runJwt);
   }
 }

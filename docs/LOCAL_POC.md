@@ -19,6 +19,13 @@ ARK_API_KEY=your-ark-api-key ARK_MODEL=ep-your-endpoint-id npm run poc
 Open <http://localhost:3000>. Press `Ctrl+C` to stop the server and remove this
 instance's remaining Runtime containers.
 
+The server listens on all interfaces: each Runtime container calls the Agent
+Access Gateway through its engine's host alias (`host.docker.internal`,
+`host.containers.internal`), which never arrives on the host loopback
+interface. Because that bind is beyond loopback, the script mints an ephemeral
+`APP_AUTH_TOKEN` for the run and prints it for the browser unlock screen when
+you have not set one in `.env`.
+
 Force an engine with `CONTAINER_ENGINE=docker` or
 `CONTAINER_ENGINE=podman`. Colima uses the Docker CLI.
 

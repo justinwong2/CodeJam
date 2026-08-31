@@ -1,16 +1,20 @@
 import path from "node:path";
 import { AgentService } from "./agent-service.js";
 import { createApp } from "./app.js";
-import { loadConfig, writeCodexConfig } from "./config.js";
-import { createRunner } from "./runner-factory.js";
+import { loadConfig } from "./config.js";
+import { createRunner, runnerGatewayBaseUrl } from "./runner-factory.js";
 import { JsonStore } from "./store.js";
 import { WorkspaceManager } from "./workspace.js";
 
+// Codex's config.toml is written by the active runner, not here: the gateway
+// origin Codex must call differs between a host process and a container.
 const config = loadConfig();
-await writeCodexConfig(config);
 
 const store = new JsonStore(path.join(config.dataDirectory, "launchpad.json"));
-const workspaces = new WorkspaceManager(config.workspaceRoot);
+const workspaces = new WorkspaceManager(
+  config.workspaceRoot,
+  runnerGatewayBaseUrl(config),
+);
 const runner = createRunner(config);
 const service = new AgentService(config, store, workspaces, runner);
 await service.initialize();

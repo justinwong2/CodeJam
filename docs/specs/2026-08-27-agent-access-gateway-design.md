@@ -77,6 +77,10 @@ one opaque unit and cannot authorize the calls Codex makes inside it.
 
 ### Contract 1 — Gateway HTTP (frozen day 1)
 
+> **Amended 2026-08-30** — see [Amendments](#amendments-2026-08-30): ownership
+> denials on `docs` now answer `404` (A1), and model calls are role-checked
+> (A2). The text below is the day-1 contract, kept verbatim.
+
 - `POST /gateway/v1/responses` — model proxy. Accepts the OpenAI-compatible
   Responses request body Codex sends; `Authorization: Bearer <RUN_JWT>`.
   Verifies JWT → (model calls need no tool-RBAC) → injects `ARK_API_KEY` →
@@ -91,6 +95,10 @@ tool, resource?)` → injects that tool's credential → forwards to the mock to
   responding.
 
 ### Contract 2 — Authorization (frozen day 1)
+
+> **Amended 2026-08-30** — see [Amendments](#amendments-2026-08-30): the
+> ownership rule becomes "owned **or** public" via a `visibility` field on the
+> resource (A3). The text below is the day-1 contract, kept verbatim.
 
 ```ts
 // can() is the single authorization entry point; gateway routes and the
@@ -262,3 +270,238 @@ mocked so tests spend no real tokens.
 
 Critical path: Track A's day-1 passthrough proves streaming + reachability;
 everything else integrates against a stub gateway until A is real.
+
+## Amendments (2026-08-30)
+
+All six original slices shipped against the day-1 contracts. The design
+discussion for slices 7 (Operator Console) and 8 (Documents) amended them as
+recorded here — loudly, per the drift-control rules, never silently. Domain
+language for the new concepts (Invisible, Visibility, Scope, Suspended,
+Operator Console) lives in [/CONTEXT.md](../../CONTEXT.md); the
+invisible-over-denied decision has its own ADR:
+[../adr/2026-08-30-invisible-documents.md](../adr/2026-08-30-invisible-documents.md).
+
+### A1 — Ownership denial on `docs` answers `404` (amends Contract 1)
+
+**Was:** `403` on ownership denial. **Now:** a direct fetch of a document the
+principal may not read returns the same `404 { error: "Document not found" }`
+— status and body identical — that a nonexistent id returns. The audit record
+still carries the true `deny` / ownership reason; the agent-facing answer and
+the audit deliberately diverge. Tool-RBAC denials remain `403`: they name a
+tool, not a resource, so they disclose nothing about any document. Rationale,
+trade-offs, and alternatives: see the ADR above.
+
+### A2 — Model calls are role-checked (amends Contract 1)
+
+**Was:** "(model calls need no tool-RBAC)." **Now:** the model proxy resolves
+the principal and runs `can(principal, "model")` before forwarding; a role
+that does not grant `model` → `403` with one audit `deny` row, upstream never
+called. This turns `ROLE_TOOLS`'s hitherto-unread `model` entry into real
+policy, and is what makes the `suspended` role (A4) total: a suspended owner's
+agent loses the model, not just the tools. `401` remains the answer for
+authentication failures, `403` for authorization.
+
+### A3 — `can()` learns visibility (amends Contract 2)
+
+The resource parameter becomes `{ ownerId, visibility }`. Rule: allow iff the
+role grants the tool **and**, when a resource is named, the principal owns it
+**or** its visibility is `public`. The predicate has exactly one home — a pure
+`visibleTo(doc, ownerId)` in `authz.ts` — imported by both the gateway
+(direct fetch) and the mock tool service (search scoping, A5). The
+`(principal, tool, resource, scope)` generalization was anticipated by the
+ADR's Follow-Up; this is that extension, not scope creep.
+
+### A4 — The `suspended` role (amends the Data Contract)
+
+`Role` gains a third value: `"suspended"`, with `ROLE_TOOLS.suspended = []`.
+A suspended owner's agents are refused every gateway call — model included
+(A2) — on the next per-call lookup, while their run credential stays valid,
+unexpired, and unrevoked. The credential is identity, never permission;
+suspension is a store write, not a token event. Assigning roles (including
+`suspended`) from the Operator Console is in scope; authoring roles remains
+deferred.
+
+### A5 — Search is scoped by the gateway, applied by the tool
+
+The gateway resolves the principal and forwards the authorized scope — the
+principal's owner id — in an `x-launchpad-scope` header beside the existing
+tool credential. The tool service filters search results with the shared
+`visibleTo` predicate, mechanically: it never learns roles and cannot widen
+the scope. A missing scope header is refused (fail closed — only the gateway
+can reach the service, so absence means a gateway bug). The gateway continues
+to forward response bytes unparsed. `SEARCH_CORPUS` is retired: its entries
+become seeded **public** documents, so search reads the one real document
+collection and the now-false comment in `mock-tools.ts` about unscoped search
+is replaced.
+
+### A6 — Documents get `visibility`, uploads, and browser surfaces
+
+`MockDoc` gains `visibility: "public" | "private"`; the tolerant loader
+defaults missing values to `private`. Humans get a browser surface under
+`/api`: a listing scoped by the same `visibleTo` predicate (own + public,
+no operator override on this surface), and create-only upload — small text
+content, visibility fixed at creation, owner always resolved server-side from
+`x-launchpad-user`, never from the body. No edit, delete, toggle, sharing,
+or groups. Audit records continue to store resource identifiers only, never
+document content.
+
+Implementation is sliced in
+[../issues/slices-operator-console-and-documents.md](../issues/slices-operator-console-and-documents.md):
+slice 7 (Operator Console + suspended role + A2) lands before slice 8
+(documents, A1/A3/A5/A6), so the console's decision feed and ground-truth
+table are running while the document work is built and demoed.
+
+### A7 — Token budgets are enforced, not only metered (amends Contract 1)
+
+**Was:** `402` reserved for "budget, stretch" and never returned; the ADR's
+Follow-Up labelled budget enforcement a deferred extension hook. **Now:** the
+model proxy refuses a call whose owner has no allowance left, with `402`, one
+audit `deny` row, and no upstream request. This is that extension, built.
+
+The problem it closes is the half the gateway left open. Removing the
+credential from the Runtime means an agent can no longer **steal** the Ark key;
+it says nothing about **spending** it. An autonomous actor decides its own
+control flow, so a looping or prompt-injected agent calls the model without
+bound, and `RunUsage` reports what a Run cost only once it has finished
+costing it.
+
+**The ceiling.** One number per human — `User.tokenBudget`, `0` for unlimited —
+set by the operator through the existing `PATCH /api/users/:id`, beside the
+role. It is on no owner-facing route: an Agent's owner cannot raise the limit
+their Agents are held to, for the same reason a role is not carried in a run
+credential. A human the store predates loads as unlimited; unlike visibility's
+`private` default, the permissive direction is the safe one here, because a
+ceiling nobody set must not strand an existing demo's Agents, and `can()` has
+already decided whether the call may happen at all.
+
+**Two ledgers, deliberately.** Settled spend comes from the `usage` of an
+owner's **completed** Runs — exact, parsed from Codex. In-flight spend is the
+gateway's own meter, estimated from request body size at a named
+bytes-per-token constant. The two are labelled differently wherever they
+appear, because they are not the same kind of number.
+
+**The two ledgers are read differently, because they measure different
+things.** In-flight spend **sums** the calls a Run makes: Ark resumes the thread
+server-side, so each request carries its own turn, and a Run making ten calls
+costs ten calls' worth — measured, a ten-call Run cost ~50,000 tokens where its
+largest single call was ~5,000. Settled spend takes an Agent's **latest**
+`RunUsage` rather than summing its Runs, because that figure is cumulative for
+the thread and already contains every Run before it. A settled figure also
+_supersedes_ the estimate for its Run: the moment real usage lands, the guess
+must stop counting, or the same tokens are charged twice.
+
+**`RunUsage` is cumulative for a thread, not per Run.** Codex resumes the
+Agent's thread each turn and reports the whole conversation's total, so a
+turn's figure already contains every turn before it. Settled spend is therefore
+read as _the Agent's latest figure_, not a sum over its Runs — summing would
+add up a running total and over-count by roughly the number of turns, worst on
+exactly the long conversations a ceiling exists for. `cachedInputTokens` is
+excluded for the same reason: it is a subset of `inputTokens`, not a bucket
+beside it. A reset subtracts the figure standing at the watermark, because a
+thread total never goes back down.
+
+**Where the in-flight meter lives.** In memory in the gateway module, keyed by
+Run, never in the store: it is working state rather than evidence, written on
+every model call, and worth nothing once a Run ends. That is safe because the
+startup sweep already revokes the sessions of interrupted Runs, so a meter can
+never outlive the credential it was counting.
+
+**Checked before the spend, not after.** "Would this call take the owner over?"
+rather than "have they already gone over?" — so the ceiling is never discovered
+only once it has been breached, and a refused call is charged nothing.
+
+**Order.** `authenticate → resolvePrincipal → can() → budget → record → forward`.
+Budget runs after authorization, matching role-before-ownership: the coarser
+failure names itself first, so a suspended owner is told they are suspended
+rather than that they are out of tokens. The status distinguishes them too —
+`403` is "they may not", `402` is "they may, but they cannot afford to".
+
+**The count rides in the allow row.** Each allow record's reason carries the
+running total, so the evidence panel shows spend climbing toward a refusal
+instead of a refusal arriving from nowhere. It remains one record per decision:
+the count is a property of the decision, not a second row about it.
+
+**Spend can be reset.** A ceiling that only ever fills up is a ceiling that
+eventually stops every Agent, and "raise the number" is not the operator action
+this wants — it moves the goalposts rather than restoring the allowance. So
+`PATCH /api/users/:id` also takes `resetSpend: true`, which forgives what a
+human has spent without changing what they may spend.
+
+It is implemented as a **watermark**, not a deletion: `User.budgetResetAt` marks
+the moment, and `sumOwnerTokens` counts only Runs completed after it. The Runs,
+their `usage`, and their audit records all survive intact — only what counts
+against the ceiling changes, so a reset costs no history. And it is an **action
+rather than a timestamp** in the request: the server decides when the reset
+happened, so a caller cannot forgive spend selectively or retroactively.
+
+A reset clears **both** ledgers. The watermark handles settled spend; the route
+then clears that owner's in-flight meters, because a Run makes many model calls
+and what it has spent so far lives in the gateway's memory. Forgetting only the
+settled half would make "reset" mean "reset once whatever is running now has
+finished".
+
+#### Rejected alternatives
+
+- **Counting model calls instead of tokens.** A call carrying a full 262k
+  context and one carrying a sentence are not the same spend, and counting
+  calls cannot tell them apart.
+- **A per-call size ceiling.** An arbitrary limit on one request breaks
+  legitimate large-context work — Codex resends the conversation every turn —
+  and Codex cannot retry smaller: it sees a `402` and the Run dies. Metering
+  size against a budget protects the same thing without refusing work the
+  budget can afford.
+- **Per-agent budgets allocated by the owner.** Finer-grained, but the owner
+  sets them, so they bound only an owner who chooses to be bound. The ceiling
+  that matters is the one its subject cannot raise.
+- **Resetting spend by deleting Runs.** It would make the sum drop, at the cost
+  of the Run record and its audit trail — destroying history to move a number.
+  The watermark achieves the same arithmetic and keeps everything.
+- **Counting from the audit trail.** The row-per-allowed-call already exists,
+  so the count would be free — but `AuditSink` is documented as append-only
+  from the gateway's side. Making evidence load-bearing for enforcement would
+  invert that; the trail stays evidence.
+- **Parsing per-call usage from the SSE stream.** Exact in-flight counts, at
+  the cost of the streaming passthrough — the one path that must not break.
+  Byte estimation is the substitute, and its imprecision is documented rather
+  than hidden.
+
+#### Known limitations
+
+In-flight spend is estimated, not measured. Settled spend lags by one Run,
+since usage lands at completion. A Run whose usage never parsed counts as zero
+— fail-open, with the in-flight meter as the backstop. The meter is
+per-process, consistent with the single-process store. Tool calls are not
+budgeted: budget is about model token spend, and `payments` amounts are a mock.
+Budget changes are unaudited, exactly as role changes already are.
+
+### A8 — Per-Agent tool delegation narrows owner authority
+
+**Was:** every Agent inherited the complete tool set of its owner's live role.
+**Now:** `Agent.toolGrants` may narrow that set. `null` preserves inheritance;
+an explicit array is an Agent-specific ceiling, and `[]` grants nothing. The
+effective permission is:
+
+`owner role ∩ Agent tool grants ∩ resource visibility`, followed by the model
+budget where applicable.
+
+Both role and Agent grants are loaded from the store on every gateway call and
+are absent from the run credential. A grant-only `PATCH /api/agents/:id` is
+therefore allowed while a Run is busy and changes the next call made with the
+same JWT. Workspace identity/instruction edits remain blocked while busy.
+
+The owner role is evaluated first, so an explicit `payments` grant cannot
+elevate a basic owner and a suspended owner remains totally suspended. Agent
+grant denial is next and returns `403` before resource lookup or budget. Only
+after both tool ceilings allow does document visibility run; its invisible
+`404` behavior is unchanged. A model grant denial happens before budget and is
+charged nothing.
+
+Legacy Agents load `toolGrants: null` to keep their behavior. A malformed
+explicit stored value loads as `[]`, failing closed rather than converting
+corrupt policy into inheritance. Rationale and alternatives are recorded in
+[the delegation ADR](../adr/2026-08-31-agent-tool-delegation.md).
+
+The browser's grant choices are not a second hard-coded policy table.
+`GET /api/users` returns `delegatableToolsByRole` from server-side
+`ROLE_TOOLS`; Create and Settings render only the selected owner's list. This
+keeps `payments` absent for a basic owner while leaving enforcement at `can()`.

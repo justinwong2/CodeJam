@@ -1,4 +1,19 @@
-import type { Agent, AgentRun, Message, SystemInfo } from "./types";
+import type {
+  Agent,
+  AgentRun,
+  AuditRecord,
+  Message,
+  MockDoc,
+  MockDocMetadata,
+  OwnerSpend,
+  Role,
+  RunSessionClaims,
+  SystemInfo,
+  ToolName,
+  User,
+  Visibility,
+} from "./types";
+import { DEFAULT_OWNER_ID } from "./types";
 
 export class ApiError extends Error {
   constructor(
@@ -9,16 +24,57 @@ export class ApiError extends Error {
   }
 }
 
+/** Names the human a browser request acts as; the server validates it. */
+const ACTING_USER_HEADER = "x-launchpad-user";
+const ACTING_USER_STORAGE_KEY = "launchpad.acting-user";
+
 let authToken = "";
+
+/**
+ * The selection is read here, at module load, rather than from a component:
+ * the very first request the app makes must already carry the user chosen
+ * before the last reload, or the server would answer as the default owner.
+ */
+let actingUserId = readStoredActingUser();
+
+function readStoredActingUser(): string {
+  try {
+    return (
+      window.localStorage.getItem(ACTING_USER_STORAGE_KEY) ?? DEFAULT_OWNER_ID
+    );
+  } catch {
+    // Storage can be unavailable (private mode, blocked cookies). The
+    // switcher is a dev convenience; falling back is better than failing.
+    return DEFAULT_OWNER_ID;
+  }
+}
 
 export function setAuthToken(token: string): void {
   authToken = token.trim();
+}
+
+export function getActingUserId(): string {
+  return actingUserId;
+}
+
+/**
+ * Change who the browser acts as. This decides nothing: it only names a user
+ * on every subsequent request, and the server resolves that user's authority.
+ */
+export function setActingUserId(id: string): void {
+  actingUserId = id;
+  try {
+    window.localStorage.setItem(ACTING_USER_STORAGE_KEY, id);
+  } catch {
+    // Selection then lasts for this tab only; requests still carry it.
+  }
 }
 
 async function request<T>(url: string, options?: RequestInit): Promise<T> {
   const headers = {
     ...(options?.body ? { "Content-Type": "application/json" } : {}),
     ...(authToken ? { Authorization: "Bearer " + authToken } : {}),
+    [ACTING_USER_HEADER]: actingUserId,
     ...options?.headers,
   };
   const response = await fetch(url, {
@@ -37,11 +93,17 @@ async function request<T>(url: string, options?: RequestInit): Promise<T> {
 export const api = {
   auth: () => request<{ required: boolean }>("/api/auth"),
   system: () => request<SystemInfo>("/api/system"),
+  users: () =>
+    request<{
+      users: User[];
+      delegatableToolsByRole: Record<Role, ToolName[]>;
+    }>("/api/users"),
   listAgents: () => request<{ agents: Agent[] }>("/api/agents"),
   createAgent: (body: {
     name: string;
     description: string;
     instructions: string;
+    toolGrants: ToolName[] | null;
   }) =>
     request<{ agent: Agent }>("/api/agents", {
       method: "POST",
@@ -49,7 +111,12 @@ export const api = {
     }),
   updateAgent: (
     id: string,
-    body: { name: string; description: string; instructions: string },
+    body: Partial<{
+      name: string;
+      description: string;
+      instructions: string;
+      toolGrants: ToolName[] | null;
+    }>,
   ) =>
     request<{ agent: Agent }>("/api/agents/" + id, {
       method: "PATCH",
@@ -79,5 +146,49 @@ export const api = {
         body: JSON.stringify({ content }),
       },
     ),
+  // The human half of the document surface. The server scopes the listing to
+  // the acting user and stamps the owner on an upload; the browser names
+  // neither, and could not make either stick if it tried.
+  docs: () => request<{ docs: MockDoc[] }>("/api/docs"),
+  uploadDoc: (body: {
+    title: string;
+    content: string;
+    visibility: Visibility;
+  }) =>
+    request<{ doc: MockDoc }>("/api/docs", {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
   run: (id: string) => request<{ run: AgentRun }>("/api/runs/" + id),
+  runAudit: (id: string) =>
+    request<{ audit: AuditRecord[] }>("/api/runs/" + id + "/audit"),
+
+  // The Operator Console's reads and its two levers. Both levers are ordinary
+  // control-plane calls: the server decides what they mean, and the console is
+  // only the thing that asks.
+  operatorAudit: () => request<{ audit: AuditRecord[] }>("/api/operator/audit"),
+  operatorSessions: () =>
+    request<{ sessions: RunSessionClaims[] }>("/api/operator/sessions"),
+  operatorDocs: () =>
+    request<{ docs: MockDocMetadata[] }>("/api/operator/docs"),
+  operatorSpend: () => request<{ spend: OwnerSpend[] }>("/api/operator/spend"),
+  setUserRole: (id: string, role: Role) =>
+    request<{ user: User }>("/api/users/" + id, {
+      method: "PATCH",
+      body: JSON.stringify({ role }),
+    }),
+  setUserTokenBudget: (id: string, tokenBudget: number) =>
+    request<{ user: User }>("/api/users/" + id, {
+      method: "PATCH",
+      body: JSON.stringify({ tokenBudget }),
+    }),
+  resetUserSpend: (id: string) =>
+    request<{ user: User }>("/api/users/" + id, {
+      method: "PATCH",
+      body: JSON.stringify({ resetSpend: true }),
+    }),
+  revokeAgentSessions: (id: string) =>
+    request<{ revokedSessions: number }>("/api/agents/" + id + "/revoke", {
+      method: "POST",
+    }),
 };

@@ -1,19 +1,82 @@
 import cors from "@fastify/cors";
 import fastifyStatic from "@fastify/static";
-import Fastify, { type FastifyInstance } from "fastify";
+import Fastify, { type FastifyInstance, type FastifyRequest } from "fastify";
 import { timingSafeEqual } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { z } from "zod";
 import type { AppConfig } from "./config.js";
 import { HttpError } from "./errors.js";
+import {
+  clearOwnerMeters,
+  ownerSpendInFlight,
+  registerGateway,
+} from "./gateway.js";
+import { registerMockTools } from "./mock-tools.js";
+import {
+  DEFAULT_OWNER_ID,
+  ROLE_NAMES,
+  ROLE_TOOLS,
+  TOOL_NAMES,
+  VISIBILITY_NAMES,
+} from "./types.js";
+import type { User } from "./types.js";
 import type { AgentService } from "./agent-service.js";
+
+/**
+ * Which human the browser is acting as. Mock authentication by design — the
+ * gateway's subject is authorization, not proving who someone is — so the
+ * switcher names a seeded user and the server validates that it exists.
+ */
+const ACTING_USER_HEADER = "x-launchpad-user";
+const actingUserHeader = z.string().trim().min(1).optional();
 
 const agentIdParams = z.object({ id: z.string().uuid() });
 const runIdParams = z.object({ id: z.string().uuid() });
+const userIdParams = z.object({ id: z.string().trim().min(1).max(64) });
+/**
+ * The whole vocabulary of a role change: one of the seeded roles, and nothing
+ * else. Assigning roles is in scope for the operator; authoring them is not, so
+ * an unrecognized value is a 400 rather than a role no grant table knows.
+ *
+ * The same holds for the token ceiling, so an operator's change is a role, a
+ * budget, or both. `tokenBudget` lives only here: it is on no owner-facing
+ * route, so an Agent's owner cannot raise the limit their Agents are held to.
+ * `0` means unlimited; a negative or fractional value is a `400` rather than a
+ * ceiling nobody could reason about.
+ *
+ * `resetSpend` is an action rather than a timestamp: the operator asks for a
+ * reset and the server decides when it happened. A caller that could name the
+ * moment could forgive spend selectively, or forgive it retroactively.
+ */
+const updateUserBody = z
+  .object({
+    role: z.enum(ROLE_NAMES).optional(),
+    tokenBudget: z
+      .number()
+      .int()
+      .min(0)
+      .max(Number.MAX_SAFE_INTEGER)
+      .optional(),
+    resetSpend: z.literal(true).optional(),
+  })
+  .refine(
+    (body) =>
+      body.role !== undefined ||
+      body.tokenBudget !== undefined ||
+      body.resetSpend !== undefined,
+    "Provide a role, a tokenBudget, resetSpend, or a combination",
+  );
+const toolGrants = z
+  .array(z.enum(TOOL_NAMES))
+  .max(TOOL_NAMES.length)
+  .refine((tools) => new Set(tools).size === tools.length, {
+    message: "Tool grants must not contain duplicates",
+  });
 const createAgentBody = z.object({
   name: z.string().trim().min(1).max(80),
   description: z.string().max(500).optional(),
   instructions: z.string().max(10_000).optional(),
+  toolGrants: toolGrants.nullable().optional(),
 });
 const updateAgentBody = createAgentBody
   .partial()
@@ -24,6 +87,56 @@ const updateAgentBody = createAgentBody
 const messageBody = z.object({
   content: z.string().trim().min(1).max(50_000),
 });
+
+/** A few KB of prose. A document is a demo fixture, not a file store. */
+const MAXIMUM_DOCUMENT_CONTENT = 4_000;
+
+/**
+ * Plain text: no control characters beyond the ones prose is written with. An
+ * Upload is something to read, so content carrying a NUL or an escape is
+ * refused rather than stored and handed to an Agent later.
+ */
+function isPlainText(value: string): boolean {
+  for (const character of value) {
+    const code = character.codePointAt(0) ?? 0;
+    const written = code === 0x09 || code === 0x0a || code === 0x0d;
+    if (!written && (code < 0x20 || code === 0x7f)) return false;
+  }
+  return true;
+}
+
+/**
+ * An Upload, as a client may express it. `strictObject` is the enforcement of
+ * "the owner is never taken from the body": an `ownerId` here is a rejection,
+ * not a field that is quietly ignored and might one day be quietly read.
+ * Visibility is chosen once, here, and nothing edits it afterwards.
+ */
+const createDocumentBody = z.strictObject({
+  title: z.string().trim().min(1).max(120),
+  content: z
+    .string()
+    .min(1)
+    .max(MAXIMUM_DOCUMENT_CONTENT)
+    .refine(isPlainText, "A document must be plain text"),
+  visibility: z.enum(VISIBILITY_NAMES),
+});
+
+/**
+ * The human a browser request acts as: the named seeded user, or the default
+ * owner when no user is named. A named user who does not exist is a client
+ * mistake and is refused — acting as somebody else instead would hand the
+ * caller whichever permissions the fallback happens to have.
+ */
+function actingUser(request: FastifyRequest, service: AgentService): User {
+  const named =
+    actingUserHeader.parse(request.headers[ACTING_USER_HEADER]) ??
+    DEFAULT_OWNER_ID;
+  const user = service.findUser(named);
+  if (!user) {
+    throw new HttpError(400, `Unknown user "${named}"`);
+  }
+  return user;
+}
 
 export async function createApp(
   config: AppConfig,
@@ -36,6 +149,8 @@ export async function createApp(
     },
     bodyLimit: 1_048_576,
   });
+
+  setErrorHandler(app);
 
   await app.register(cors, {
     origin:
@@ -65,6 +180,26 @@ export async function createApp(
     }
   });
 
+  // Resolving the acting human here, rather than only where ownership is
+  // stamped, means a browser request naming a user who does not exist is
+  // refused everywhere instead of on the one route that happens to read it.
+  app.addHook("onRequest", async (request) => {
+    if (!request.url.startsWith("/api/")) {
+      return;
+    }
+    actingUser(request, service);
+  });
+
+  // Agent-facing routes. The onRequest hook above guards /api/* only, so the
+  // gateway is deliberately outside APP_AUTH_TOKEN: agents authenticate with
+  // their own per-run credential, which the service mints and can revoke.
+  await registerGateway(app, config, service);
+
+  // The downstream the gateway forwards authorized tool calls to. Also outside
+  // the browser hook, and guarded instead by a credential only the gateway
+  // holds — so the authorization check cannot be walked around by calling here.
+  await registerMockTools(app, config, service);
+
   app.get("/api/health", async () => ({
     ok: true,
     service: "volc-agent-launchpad",
@@ -74,11 +209,90 @@ export async function createApp(
 
   app.get("/api/system", async () => service.systemInfo());
 
+  // The UI renders the server's real role table rather than maintaining a
+  // second hard-coded tool list. This is display data only; `can()` still
+  // resolves and enforces the same table independently on every Agent call.
+  app.get("/api/users", async () => ({
+    users: service.listUsers(),
+    delegatableToolsByRole: ROLE_TOOLS,
+  }));
+
+  // The operator's other lever, beside revocation: change what a human may do
+  // rather than cutting one run off. It takes effect on that human's Agents'
+  // next gateway call, with no token event of any kind, because permissions are
+  // read from the store per call and were never in the credential.
+  app.patch("/api/users/:id", async (request) => {
+    const { id } = userIdParams.parse(request.params);
+    const body = updateUserBody.parse(request.body);
+    const user = await service.updateUser(id, body);
+    if (body.resetSpend) {
+      // The second half of a reset, and the reason it is done here rather than
+      // in the service: settled spend is the store's to forget, but what Runs
+      // still in flight have spent lives in the gateway's memory. Clearing only
+      // one would make "reset" mean "reset once the current run has finished".
+      // Ordered after the write, so a rejected change clears nothing.
+      clearOwnerMeters(id);
+    }
+    return { user };
+  });
+
+  // The Operator Console's reads. Behind the shared token like the rest of
+  // /api, and read-only: the console displays what the server decided and
+  // triggers the levers that already exist. It enforces nothing.
+  app.get("/api/operator/audit", async () => ({
+    audit: service.listAuditRecords(),
+  }));
+
+  app.get("/api/operator/sessions", async () => ({
+    sessions: service.listSessionClaims(),
+  }));
+
+  app.get("/api/operator/docs", async () => ({
+    docs: service.listDocumentMetadata(),
+  }));
+
+  // What each human has spent against their ceiling. Assembled here rather than
+  // in the service because the two halves live in different places: settled
+  // spend is the store's, and what Runs in flight have spent is the gateway's.
+  // Nothing here decides anything — the ceiling computes its own total on the
+  // call it is deciding about, and never reads this.
+  app.get("/api/operator/spend", async () => ({
+    spend: service.listUsers().map((user) => ({
+      userId: user.id,
+      budget: user.tokenBudget,
+      settled: service.sumOwnerTokens(user.id),
+      inFlight: ownerSpendInFlight(service, user.id, config.sessionTtlMs),
+    })),
+  }));
+
+  // The human half of the document surface. Scoped by the same `visibleTo` the
+  // gateway scopes an Agent's search with — the symmetry is the point, and it
+  // is why there is no operator override here: the console's metadata-only
+  // table is the all-seeing view, and it carries no content.
+  app.get("/api/docs", async (request) => ({
+    docs: service.listVisibleDocuments(actingUser(request, service).id),
+  }));
+
+  // Upload: create-only. The server generates the id and stamps the acting
+  // human as owner; the body may name neither. Visibility is chosen here and
+  // never changed, because there is nothing that changes it.
+  app.post("/api/docs", async (request, reply) => {
+    const body = createDocumentBody.parse(request.body);
+    const doc = await service.createDocument(
+      body,
+      actingUser(request, service).id,
+    );
+    return reply.code(201).send({ doc });
+  });
+
   app.get("/api/agents", async () => ({ agents: service.listAgents() }));
 
   app.post("/api/agents", async (request, reply) => {
     const body = createAgentBody.parse(request.body);
-    const agent = await service.createAgent(body);
+    const agent = await service.createAgent(
+      body,
+      actingUser(request, service).id,
+    );
     return reply.code(201).send({ agent });
   });
 
@@ -108,6 +322,13 @@ export async function createApp(
     return { agent: await service.stopAgent(id) };
   });
 
+  // Under /api, so the browser hook guards it: revocation is an operator
+  // action, not something an Agent may perform on itself.
+  app.post("/api/agents/:id/revoke", async (request) => {
+    const { id } = agentIdParams.parse(request.params);
+    return service.revokeAgentSessions(id);
+  });
+
   app.get("/api/agents/:id/messages", async (request) => {
     const { id } = agentIdParams.parse(request.params);
     return { messages: service.getMessages(id) };
@@ -130,6 +351,13 @@ export async function createApp(
     return { run: service.getRun(id) };
   });
 
+  // What the gateway decided during this Run, and why. Under /api like every
+  // browser route: the evidence is the operator's to read, never the Agent's.
+  app.get("/api/runs/:id/audit", async (request) => {
+    const { id } = runIdParams.parse(request.params);
+    return { audit: service.getRunAudit(id) };
+  });
+
   if (config.nodeEnv === "production") {
     const webRoot = fileURLToPath(new URL("../../web/dist", import.meta.url));
     await app.register(fastifyStatic, {
@@ -144,6 +372,16 @@ export async function createApp(
     });
   }
 
+  return app;
+}
+
+/**
+ * Installed before any route is registered: an encapsulated plugin captures the
+ * error handler in force when it boots, so a handler set afterwards would leave
+ * the gateway and tool scopes on Fastify's default — which answers a rejected
+ * body with a bare 500 instead of the 400 the caller earned.
+ */
+function setErrorHandler(app: FastifyInstance): void {
   app.setErrorHandler((error, request, reply) => {
     const appError = error instanceof Error ? error : new Error(String(error));
     const validationError = error instanceof z.ZodError;
@@ -167,6 +405,4 @@ export async function createApp(
       ...(validationError ? { details: error.issues } : {}),
     });
   });
-
-  return app;
 }

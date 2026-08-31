@@ -28,11 +28,28 @@ Summary — canonical list is in [CLAUDE.md](CLAUDE.md#invariants-to-preserve).
 1. The baseline must keep working: CRUD, lifecycle, Playground, persistence.
 2. `npm run check` must pass.
 3. No secret in source, Git history, logs, traces, screenshots, or demo output.
-4. The Ark API key never reaches the browser or argv.
+4. The Ark API key never reaches the browser, argv, or the Agent Runtime; the
+   gateway attaches it only when forwarding upstream.
 5. Runs stay asynchronous; the UI polls `/api/runs/:id`.
 6. Codex thread continuity powers multi-turn conversations.
 7. Agent deletion archives the workspace; it does not destroy it.
 8. Middleware enforces server-side, never UI-only.
+9. The gateway fails closed: an unverifiable run credential is `401` and the
+   upstream is never called.
+10. Authorization is decided per call from stored policy, not from the token:
+    effective authority is the owner's live role intersected with the Agent's
+    live `toolGrants`, then resource visibility. Agent grants may narrow but
+    never elevate; `null` inherits and `[]` grants nothing. A denied call is
+    `403` and nothing is forwarded — tools or the model. A role or grant change
+    therefore takes effect on the next call, with no token event. The one
+    exception to `403` is a document the principal may not read: it is
+    _invisible_, so the answer is the same `404` a nonexistent id gets while the
+    audit row carries the true ownership reason.
+11. Visibility is decided by one predicate, `visibleTo()` in `authz.ts`, imported
+    by the gateway (direct fetch) and the mock tool service (search Scope). Never
+    a second copy: a drifting copy is how search leaks what a fetch hides.
+12. Every gateway decision leaves exactly one redacted audit record, written
+    before the answer is sent. No request or response body is persisted.
 
 ## Repo Map
 
@@ -45,8 +62,79 @@ Summary — canonical list is in [CLAUDE.md](CLAUDE.md#invariants-to-preserve).
 | `apps/server/src/types.ts`                  | Domain types, `AgentRunner`     |
 | `apps/server/src/codex-runner.ts`           | Codex as host process           |
 | `apps/server/src/container-codex-runner.ts` | Codex in disposable container   |
-| `apps/web/src/App.tsx`                      | Entire UI                       |
+| `apps/server/src/gateway.ts`                | Agent Access Gateway routes     |
+| `apps/server/src/run-jwt.ts`                | Per-run credential sign/verify  |
+| `apps/server/src/authz.ts`                  | `can()`, roles, ownership rule  |
+| `apps/server/src/budget.ts`                 | `withinBudget()`, spend rule    |
+| `apps/server/src/audit.ts`                  | Redacted record per decision    |
+| `apps/server/src/mock-tools.ts`             | docs/search/payments downstream |
+| `apps/web/src/App.tsx`                      | Entire UI (display-only)        |
+| `apps/web/src/api.ts`                       | Fetch wrappers, acting user     |
 | `docs/`                                     | Architecture, deployment, brief |
+
+Browser-facing routes live under `/api/*` behind the shared demo token,
+including the operator's kill switch:
+
+| Method | Path                     | Purpose                                           |
+| ------ | ------------------------ | ------------------------------------------------- |
+| GET    | `/api/users`             | Seeded users for the dev user switcher            |
+| PATCH  | `/api/users/:id`         | Operator: role / budget / reset; 404 / 400        |
+| POST   | `/api/agents/:id/revoke` | Revoke the Agent's live run sessions mid-run      |
+| GET    | `/api/docs`              | Documents the acting human may see (own + public) |
+| POST   | `/api/docs`              | Upload: `{ title, content, visibility }`, 201     |
+| GET    | `/api/runs/:id/audit`    | That Run's gateway decisions, ordered by `ts`     |
+| GET    | `/api/operator/audit`    | Every Run's decisions in one feed, by `ts`        |
+| GET    | `/api/operator/sessions` | Run sessions as claims — never the credential     |
+| GET    | `/api/operator/docs`     | Document metadata — id, title, owner, visibility  |
+| GET    | `/api/operator/spend`    | Per-human settled + in-flight spend, and ceiling  |
+
+Browser requests name the acting human with `x-launchpad-user` (a seeded user
+id; `user-a` when absent, `400` when unknown). It sets a created Agent's
+`ownerId`; the gateway never reads it. The dev user switcher in the web app is
+what chooses it — persisted in `localStorage` and attached by `api.ts` to every
+request. Like the Run evidence panel, it displays and names; it decides nothing.
+
+The Operator Console is the third browser surface, and the same kind of thing:
+it reads the three `/api/operator/*` endpoints and triggers the two levers that
+already exist (revoke a session, assign a role). It is deliberately not gated by
+the `admin` role — mock auth makes role-gating an operator surface theater —
+and it enforces nothing. "Operator" is the surface; "admin" is only the role.
+
+The Documents panel is the fourth, and the same kind of thing again: it lists
+what `GET /api/docs` answered for the acting human and uploads through
+`POST /api/docs`. It filters nothing and chooses no owner — the server scopes the
+listing and stamps the owner, and switching the acting user simply asks again.
+
+The agent-facing gateway is separate and deliberately outside that hook —
+agents authenticate with their own per-run credential, which the control plane
+mints and can revoke:
+
+Agent create/update also accepts `toolGrants: null | ToolName[]`. `null`
+inherits the owner's role, while an explicit list is an Agent-level ceiling.
+Grant-only updates are allowed mid-run so the next gateway call sees them;
+workspace configuration edits remain blocked while busy.
+
+| Method | Path                        | Purpose                                                                                                             |
+| ------ | --------------------------- | ------------------------------------------------------------------------------------------------------------------- |
+| POST   | `/gateway/v1/responses`     | Model proxy: verifies the run session, applies `can()` and the owner's budget, injects the Ark key, streams through |
+| ALL    | `/gateway/v1/tools/:tool/*` | Tool proxy: verifies the run session, resolves the principal, applies `can()`, then forwards                        |
+
+`:tool` is `docs`, `search`, or `payments`. The role comes from the Agent's
+current owner in the store, never from the token, so a denial is a `403` and
+nothing is forwarded — including on the model route, which is what makes the
+`suspended` role (no tools at all) total rather than tool-only. A `docs`
+ownership denial is the exception: it answers `404 { error: "Document not
+found" }`, byte-identical to an unknown id, and files the real reason. Search is
+scoped rather than denied — the gateway sends the principal's owner id in
+`x-launchpad-scope`, and the tool service filters with the same `visibleTo` and
+refuses a call that carries no scope. Forwarding targets the mock tool service at
+`/internal/tools/*`, which accepts only calls carrying
+`GATEWAY_TOOL_CREDENTIAL` — the credential is what makes skipping the gateway a
+refusal rather than a shortcut.
+
+Both gateway routes file one redacted audit record per decision through
+`audit.ts` before they answer — allow or deny, model or tool — and the operator
+reads a Run's trail back at `GET /api/runs/:id/audit`.
 
 ## Extension Seams
 
@@ -73,8 +161,15 @@ npm run poc       # local POC with container Runtime
   work? Any change to `app.ts` or `agent-service.ts` deserves scrutiny here.
 - **Enforcement location:** is the check server-side? A UI-only guard is not
   middleware and is trivially bypassed.
+- **Delegation ceiling:** does the owner role still gate every Agent grant? Are
+  both read from the store on each call, with no permission copied into the
+  JWT? Does malformed stored explicit policy fail closed?
 - **Secrets:** no keys or tokens in source, logs, traces, fixtures, or test
-  output. Are captured payloads redacted before storage?
+  output. Are captured payloads redacted before storage? A new field on
+  `AuditRecord` must go through the masking in `audit.ts`.
+- **Evidence:** does each gateway decision still write exactly one record,
+  before the response is sent, with identity taken from stored ownership rather
+  than from the credential's claims?
 - **Async contract:** message POST still returns without blocking; Run status
   still reaches a terminal state.
 - **Error handling:** what happens when the middleware itself fails? Does it

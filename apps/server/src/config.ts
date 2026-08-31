@@ -1,3 +1,4 @@
+import { randomBytes } from "node:crypto";
 import { mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { z } from "zod";
@@ -14,6 +15,13 @@ const envSchema = z.object({
     .enum(["read-only", "workspace-write", "danger-full-access"])
     .default("workspace-write"),
   CODEX_TIMEOUT_MS: z.coerce.number().int().min(1_000).default(600_000),
+  // How long a run's gateway credential stays usable. Its own variable rather
+  // than a margin bolted onto the turn timeout: the lifetime of a credential is
+  // a security decision, and it should be possible to shorten it without
+  // shortening what a turn is allowed to take. The default is the value the
+  // hardcoded coupling produced (600_000 + 60_000), so naming it changed
+  // nothing about how long a session lives.
+  SESSION_TTL_MS: z.coerce.number().int().min(1_000).default(660_000),
   CODEX_MAX_OUTPUT_BYTES: z.coerce
     .number()
     .int()
@@ -47,6 +55,9 @@ const envSchema = z.object({
     .max(128)
     .regex(/^[A-Za-z0-9._~-]*$/, "APP_AUTH_TOKEN must use URL-safe characters")
     .optional(),
+  // Validated after parsing so a rejection never echoes the value.
+  GATEWAY_JWT_SECRET: z.string().default(""),
+  GATEWAY_TOOL_CREDENTIAL: z.string().default(""),
   ARK_API_KEY: z.string().optional(),
   ARK_MODEL: z.string().optional(),
   ARK_BASE_URL: z
@@ -60,6 +71,12 @@ const envSchema = z.object({
 
 export type AppConfig = ReturnType<typeof loadConfig>;
 
+/** Short enough to type for a demo, long enough to be worth HMAC-signing with. */
+const MINIMUM_GATEWAY_JWT_SECRET_LENGTH = 16;
+
+/** The same bar for the tool credential: a guessable one guards nothing. */
+const MINIMUM_GATEWAY_TOOL_CREDENTIAL_LENGTH = 16;
+
 export function loadConfig(environment: NodeJS.ProcessEnv = process.env) {
   const env = envSchema.parse(environment);
   const authToken = env.APP_AUTH_TOKEN?.trim() ?? "";
@@ -71,6 +88,44 @@ export function loadConfig(environment: NodeJS.ProcessEnv = process.env) {
       );
     }
   }
+  // The gateway signs and verifies every per-run credential with this secret.
+  // Booting without one would leave the gateway unable to verify anything, so
+  // it is a startup error rather than a silent bypass. The message names the
+  // variable and never repeats the rejected value.
+  const gatewayJwtSecret = env.GATEWAY_JWT_SECRET.trim();
+  if (
+    gatewayJwtSecret.length < MINIMUM_GATEWAY_JWT_SECRET_LENGTH ||
+    gatewayJwtSecret.startsWith("replace-")
+  ) {
+    throw new Error(
+      "GATEWAY_JWT_SECRET must be set to at least " +
+        MINIMUM_GATEWAY_JWT_SECRET_LENGTH +
+        " random characters. The Agent Access Gateway signs every per-run " +
+        "credential with it and refuses to start without one.",
+    );
+  }
+  // The mock tool service accepts nothing that does not carry this, so the
+  // gateway is the only way in. Unlike the signing secret it names nothing
+  // outside this process — both ends of the check are in it — so an unset value
+  // is minted per process rather than refused: a demo gets a strong credential
+  // with no manual step, and no placeholder is ever left standing. A value the
+  // operator *did* set is held to the same bar as the signing secret, and a
+  // rejection names the variable without repeating the value.
+  const configuredToolCredential = env.GATEWAY_TOOL_CREDENTIAL.trim();
+  if (
+    configuredToolCredential.length > 0 &&
+    (configuredToolCredential.length < MINIMUM_GATEWAY_TOOL_CREDENTIAL_LENGTH ||
+      configuredToolCredential.startsWith("replace-"))
+  ) {
+    throw new Error(
+      "GATEWAY_TOOL_CREDENTIAL must be at least " +
+        MINIMUM_GATEWAY_TOOL_CREDENTIAL_LENGTH +
+        " random characters when it is set. Leave it unset to have the server " +
+        "mint an ephemeral one for the process.",
+    );
+  }
+  const gatewayToolCredential =
+    configuredToolCredential || randomBytes(32).toString("base64url");
   const defaultContainerUser =
     typeof process.getuid === "function" && typeof process.getgid === "function"
       ? process.getuid() + ":" + process.getgid()
@@ -85,6 +140,7 @@ export function loadConfig(environment: NodeJS.ProcessEnv = process.env) {
     codexBin: env.CODEX_BIN,
     codexSandboxMode: env.CODEX_SANDBOX_MODE,
     codexTimeoutMs: env.CODEX_TIMEOUT_MS,
+    sessionTtlMs: env.SESSION_TTL_MS,
     codexMaxOutputBytes: env.CODEX_MAX_OUTPUT_BYTES,
     runtimeProvider: env.RUNTIME_PROVIDER,
     containerEngine: env.CONTAINER_ENGINE,
@@ -95,6 +151,8 @@ export function loadConfig(environment: NodeJS.ProcessEnv = process.env) {
     containerUser: env.CONTAINER_USER?.trim() || defaultContainerUser,
     runtimeInstanceId: env.RUNTIME_INSTANCE_ID,
     authToken,
+    gatewayJwtSecret,
+    gatewayToolCredential,
     arkApiKey: env.ARK_API_KEY?.trim() ?? "",
     arkModel: env.ARK_MODEL?.trim() ?? "",
     arkBaseUrl: env.ARK_BASE_URL.replace(/\/+$/, ""),
@@ -111,7 +169,22 @@ export function isArkConfigured(config: AppConfig): boolean {
   );
 }
 
-export async function writeCodexConfig(config: AppConfig): Promise<void> {
+export interface CodexProviderTarget {
+  /** Gateway origin + prefix as the Runtime sees it, e.g. from a container. */
+  baseUrl: string;
+  /** Environment variable Codex reads its bearer credential from. */
+  envKey: string;
+}
+
+/**
+ * Written by the active runner, not at startup: the gateway origin depends on
+ * the runner's vantage point (host process vs. inside a container). Only one
+ * runner is active per process, so the shared CODEX_HOME has a single writer.
+ */
+export async function writeCodexConfig(
+  config: AppConfig,
+  target: CodexProviderTarget,
+): Promise<void> {
   await mkdir(config.codexHome, { recursive: true });
   const toml = [
     "# Generated by Volc Agent Launchpad. Edit environment variables, not this file.",
@@ -120,8 +193,8 @@ export async function writeCodexConfig(config: AppConfig): Promise<void> {
     "",
     "[model_providers.volcengine_ark]",
     'name = "Volcengine Ark"',
-    "base_url = " + JSON.stringify(config.arkBaseUrl),
-    'env_key = "ARK_API_KEY"',
+    "base_url = " + JSON.stringify(target.baseUrl),
+    "env_key = " + JSON.stringify(target.envKey),
     'wire_api = "responses"',
     "requires_openai_auth = false",
     "",

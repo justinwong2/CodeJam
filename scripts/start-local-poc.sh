@@ -93,7 +93,8 @@ detect_engine() {
 load_env_credentials() {
   [[ -f .env ]] || return 0
   local name value
-  for name in ARK_API_KEY ARK_MODEL ARK_BASE_URL APP_AUTH_TOKEN; do
+  for name in ARK_API_KEY ARK_MODEL ARK_BASE_URL APP_AUTH_TOKEN \
+    GATEWAY_JWT_SECRET; do
     if [[ -z "${!name:-}" ]]; then
       value="$(sed -n "s/^[[:space:]]*${name}=//p" .env | tail -n 1)"
       value="${value%$'\r'}"
@@ -204,8 +205,40 @@ if [[ "$codex_sandbox_mode" == "workspace-write" ]] \
 fi
 
 export NODE_ENV=production
-export HOST="${HOST:-127.0.0.1}"
+# The disposable Runtime calls the Agent Access Gateway through the container
+# host alias (host.docker.internal / host.containers.internal), which arrives on
+# a host interface that is never loopback. A 127.0.0.1 bind would make every
+# model call fail, so the POC listens on all interfaces.
+export HOST="${HOST:-0.0.0.0}"
 export PORT="${PORT:-3000}"
+
+# Listening beyond loopback in production requires the shared browser token.
+# Mint an ephemeral one for this run when the operator has not configured a real
+# one, so the wider bind never leaves the control plane unauthenticated.
+generated_auth_token=0
+case "$HOST" in
+  127.0.0.1 | localhost | ::1) ;;
+  *)
+    if [[ -z "${APP_AUTH_TOKEN:-}" || "${APP_AUTH_TOKEN}" == replace-* \
+      || ${#APP_AUTH_TOKEN} -lt 24 ]]; then
+      APP_AUTH_TOKEN="$(node -e \
+        "process.stdout.write(require('node:crypto').randomBytes(24).toString('base64url'))")"
+      export APP_AUTH_TOKEN
+      generated_auth_token=1
+    fi
+    ;;
+esac
+# The gateway signs each run's credential with this and refuses to start
+# without it. Mint an ephemeral secret when the operator has not configured one:
+# run sessions never outlive the process, so a per-run secret costs nothing and
+# keeps the demo working without a manual step.
+if [[ -z "${GATEWAY_JWT_SECRET:-}" || "${GATEWAY_JWT_SECRET}" == replace-* \
+  || ${#GATEWAY_JWT_SECRET} -lt 16 ]]; then
+  GATEWAY_JWT_SECRET="$(node -e \
+    "process.stdout.write(require('node:crypto').randomBytes(32).toString('base64url'))")"
+  export GATEWAY_JWT_SECRET
+fi
+
 export CODEX_SANDBOX_MODE="$codex_sandbox_mode"
 export RUNTIME_PROVIDER=container
 export CONTAINER_ENGINE="$engine"
@@ -232,4 +265,10 @@ log "Building the local Web and API."
 npm run build
 
 log "Open http://localhost:$PORT"
+if [[ "$generated_auth_token" == 1 ]]; then
+  log "This run generated a browser access token because the server listens"
+  log "beyond loopback. Paste it into the unlock screen, and set your own"
+  log "APP_AUTH_TOKEN in .env to skip this:"
+  log "  $APP_AUTH_TOKEN"
+fi
 npm start

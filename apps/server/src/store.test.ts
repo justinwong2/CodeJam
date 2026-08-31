@@ -1,10 +1,30 @@
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { JsonStore } from "./store.js";
+import { DATABASE_VERSION, JsonStore, SEED_DOCS, SEED_USERS } from "./store.js";
+import { DEFAULT_OWNER_ID } from "./types.js";
 
 const temporaryDirectories: string[] = [];
+
+async function temporaryFile(): Promise<string> {
+  const root = await mkdtemp(path.join(tmpdir(), "launchpad-store-test-"));
+  temporaryDirectories.push(root);
+  return path.join(root, "db.json");
+}
+
+const legacyAgent = {
+  id: "agent-1",
+  name: "Legacy",
+  description: "",
+  instructions: "",
+  status: "ready",
+  workspacePath: path.join(tmpdir(), "workspaces", "agent-1"),
+  codexThreadId: null,
+  lastError: null,
+  createdAt: "2026-08-01T00:00:00.000Z",
+  updatedAt: "2026-08-01T00:00:00.000Z",
+};
 
 afterEach(async () => {
   await Promise.all(
@@ -14,16 +34,410 @@ afterEach(async () => {
   );
 });
 
+describe("JsonStore migration", () => {
+  it("upgrades a version 1 file, keeping its rows and adding new collections", async () => {
+    const filePath = await temporaryFile();
+    await writeFile(
+      filePath,
+      JSON.stringify({
+        version: 1,
+        agents: [legacyAgent],
+        messages: [],
+        runs: [],
+      }),
+      "utf8",
+    );
+
+    const store = new JsonStore(filePath);
+    await store.initialize();
+
+    const migrated = store.snapshot();
+    expect(migrated.version).toBe(DATABASE_VERSION);
+    expect(migrated.sessions).toEqual([]);
+    expect(migrated.agents.map((agent) => agent.id)).toEqual(["agent-1"]);
+    expect(migrated.agents[0]?.toolGrants).toBeNull();
+
+    // The upgrade is durable, not just in memory.
+    const onDisk = JSON.parse(await readFile(filePath, "utf8")) as {
+      version: number;
+      sessions: unknown[];
+    };
+    expect(onDisk.version).toBe(DATABASE_VERSION);
+    expect(onDisk.sessions).toEqual([]);
+
+    // ...and the upgraded file reopens and keeps accepting writes.
+    const reopened = new JsonStore(filePath);
+    await reopened.initialize();
+    await reopened.mutate((database) => {
+      database.sessions.push({
+        runId: "run-1",
+        agentId: "agent-1",
+        ownerId: "user-a",
+        jwtId: "jwt-1",
+        revoked: false,
+        createdAt: "2026-08-02T00:00:00.000Z",
+        expiresAt: "2026-08-02T00:10:00.000Z",
+      });
+    });
+    const roundTripped = new JsonStore(filePath);
+    await roundTripped.initialize();
+    expect(roundTripped.snapshot().sessions.map((item) => item.jwtId)).toEqual([
+      "jwt-1",
+    ]);
+    expect(roundTripped.snapshot().agents).toHaveLength(1);
+  });
+
+  it("defaults collections a stored file never had", async () => {
+    const filePath = await temporaryFile();
+    await writeFile(filePath, JSON.stringify({ version: 1 }), "utf8");
+
+    const store = new JsonStore(filePath);
+    await store.initialize();
+
+    expect(store.snapshot()).toEqual({
+      version: DATABASE_VERSION,
+      agents: [],
+      messages: [],
+      runs: [],
+      sessions: [],
+      users: SEED_USERS,
+      docs: SEED_DOCS,
+      audit: [],
+    });
+  });
+
+  it("carries stored audit records forward without a version bump", async () => {
+    const filePath = await temporaryFile();
+    const record = {
+      id: "audit-1",
+      ts: "2026-08-02T00:00:00.000Z",
+      humanId: "user-a",
+      agentId: "agent-1",
+      runId: "run-1",
+      tool: "docs" as const,
+      resource: "docs/doc-a1",
+      decision: "allow" as const,
+      reason: 'Role "admin" grants the docs tool',
+    };
+    await writeFile(
+      filePath,
+      JSON.stringify({ version: 1, agents: [legacyAgent] }),
+      "utf8",
+    );
+
+    const store = new JsonStore(filePath);
+    await store.initialize();
+    expect(store.snapshot().audit).toEqual([]);
+    await store.mutate((database) => database.audit.push(record));
+
+    // Evidence outlives the process that wrote it, or it is not evidence.
+    const reopened = new JsonStore(filePath);
+    await reopened.initialize();
+    expect(reopened.snapshot().audit).toEqual([record]);
+  });
+
+  it("refuses a database written by a newer server rather than truncating it", async () => {
+    const filePath = await temporaryFile();
+    await writeFile(
+      filePath,
+      JSON.stringify({ version: DATABASE_VERSION + 1, agents: [legacyAgent] }),
+      "utf8",
+    );
+
+    const store = new JsonStore(filePath);
+    await expect(store.initialize()).rejects.toThrow(
+      /Unsupported database format/,
+    );
+  });
+});
+
+describe("Seeded users and ownership", () => {
+  it("keeps valid Agent grants and fails malformed explicit grants closed", async () => {
+    const filePath = await temporaryFile();
+    await writeFile(
+      filePath,
+      JSON.stringify({
+        version: DATABASE_VERSION,
+        agents: [
+          {
+            ...legacyAgent,
+            id: "valid",
+            toolGrants: ["model", "docs", "model"],
+          },
+          { ...legacyAgent, id: "unknown", toolGrants: ["model", "shell"] },
+          { ...legacyAgent, id: "wrong-shape", toolGrants: "model" },
+        ],
+      }),
+      "utf8",
+    );
+
+    const store = new JsonStore(filePath);
+    await store.initialize();
+    expect(
+      store.snapshot().agents.map((agent) => [agent.id, agent.toolGrants]),
+    ).toEqual([
+      ["valid", ["model", "docs"]],
+      ["unknown", []],
+      ["wrong-shape", []],
+    ]);
+
+    const reopened = new JsonStore(filePath);
+    await reopened.initialize();
+    expect(reopened.snapshot().agents[0]?.toolGrants).toEqual([
+      "model",
+      "docs",
+    ]);
+  });
+
+  /**
+   * `[]` and `null` are different policies, and the difference must survive a
+   * restart. An Agent deliberately granted nothing that reloads as `null`
+   * silently inherits everything its owner's role allows — the one direction
+   * this loader is never permitted to fail in.
+   */
+  it("keeps an empty grant empty across a reload rather than collapsing it to inherit", async () => {
+    const filePath = await temporaryFile();
+    await writeFile(
+      filePath,
+      JSON.stringify({
+        version: DATABASE_VERSION,
+        agents: [
+          { ...legacyAgent, id: "granted-nothing", toolGrants: [] },
+          { ...legacyAgent, id: "inherits", toolGrants: null },
+        ],
+      }),
+      "utf8",
+    );
+
+    const store = new JsonStore(filePath);
+    await store.initialize();
+    expect(
+      store.snapshot().agents.map((agent) => [agent.id, agent.toolGrants]),
+    ).toEqual([
+      ["granted-nothing", []],
+      ["inherits", null],
+    ]);
+
+    // The distinction is durable, not just an artifact of the first parse.
+    const reopened = new JsonStore(filePath);
+    await reopened.initialize();
+    expect(
+      reopened.snapshot().agents.map((agent) => [agent.id, agent.toolGrants]),
+    ).toEqual([
+      ["granted-nothing", []],
+      ["inherits", null],
+    ]);
+  });
+
+  it("seeds the demo users once, not once per start", async () => {
+    const filePath = await temporaryFile();
+    const store = new JsonStore(filePath);
+    await store.initialize();
+    expect(store.snapshot().users).toEqual([
+      {
+        id: "user-a",
+        name: "User A",
+        role: "admin",
+        tokenBudget: 5_000_000,
+        budgetResetAt: null,
+      },
+      {
+        id: "user-b",
+        name: "User B",
+        role: "basic",
+        tokenBudget: 5_000_000,
+        budgetResetAt: null,
+      },
+    ]);
+
+    // A restart reads the seeded rows back rather than seeding beside them.
+    const restarted = new JsonStore(filePath);
+    await restarted.initialize();
+    expect(restarted.snapshot().users.map((user) => user.id)).toEqual([
+      "user-a",
+      "user-b",
+    ]);
+  });
+
+  it("keeps an edited seeded user instead of re-seeding over it", async () => {
+    const filePath = await temporaryFile();
+    await writeFile(
+      filePath,
+      JSON.stringify({
+        version: DATABASE_VERSION,
+        users: [{ id: "user-b", name: "Renamed B", role: "basic" }],
+      }),
+      "utf8",
+    );
+
+    const store = new JsonStore(filePath);
+    await store.initialize();
+
+    // The missing seed is added; the stored one is left exactly as it was —
+    // except for the budget it predates, which loads as unlimited. That is the
+    // safe direction here: a ceiling nobody set must not strand an existing
+    // demo's Agents, and `can()` has already decided whether a call may happen.
+    expect(store.snapshot().users).toEqual([
+      {
+        id: "user-b",
+        name: "Renamed B",
+        role: "basic",
+        tokenBudget: 0,
+        budgetResetAt: null,
+      },
+      {
+        id: "user-a",
+        name: "User A",
+        role: "admin",
+        tokenBudget: 5_000_000,
+        budgetResetAt: null,
+      },
+    ]);
+  });
+
+  it("seeds the mock documents across both owners, once", async () => {
+    const filePath = await temporaryFile();
+    const store = new JsonStore(filePath);
+    await store.initialize();
+    // The fixture is only useful if both humans own some of it: an ownership
+    // denial needs a document the caller demonstrably does not own.
+    const owners = new Set(store.snapshot().docs.map((doc) => doc.ownerId));
+    expect(owners).toEqual(new Set([DEFAULT_OWNER_ID, "user-b"]));
+
+    const restarted = new JsonStore(filePath);
+    await restarted.initialize();
+    expect(restarted.snapshot().docs.map((doc) => doc.id)).toEqual(
+      SEED_DOCS.map((doc) => doc.id),
+    );
+  });
+
+  it("seeds private documents beside public ones, each with a title", async () => {
+    const filePath = await temporaryFile();
+    const store = new JsonStore(filePath);
+    await store.initialize();
+    const docs = store.snapshot().docs;
+
+    // Both visibilities have to exist for scoping to be demonstrable: the
+    // private rows are what a foreign principal never sees, the public rows are
+    // what everybody's search returns.
+    expect(docs.filter((doc) => doc.visibility === "private")).toHaveLength(3);
+    expect(
+      docs
+        .filter((doc) => doc.visibility === "public")
+        .map((doc) => doc.id)
+        .sort(),
+    ).toEqual(["kb-1", "kb-2", "kb-3"]);
+    // A public document is still owned by somebody; visibility is not a way of
+    // having no owner.
+    for (const doc of docs) {
+      expect(doc.ownerId.length).toBeGreaterThan(0);
+      expect(doc.title.length).toBeGreaterThan(0);
+    }
+  });
+
+  it("loads a document stored without a visibility as private, and keeps it", async () => {
+    const filePath = await temporaryFile();
+    await writeFile(
+      filePath,
+      JSON.stringify({
+        version: DATABASE_VERSION,
+        docs: [
+          { id: "doc-a1", ownerId: "user-b", content: "reassigned" },
+          {
+            id: "doc-legacy",
+            ownerId: "user-b",
+            content: "written before visibility existed",
+            visibility: "unknown-to-this-server",
+          },
+        ],
+      }),
+      "utf8",
+    );
+
+    const store = new JsonStore(filePath);
+    await store.initialize();
+    const docs = store.snapshot().docs;
+    // The stored rows keep their owner and content and gain the safe default —
+    // a visibility a loader had to guess is never guessed readable by everyone.
+    expect(docs[0]).toEqual({
+      id: "doc-a1",
+      ownerId: "user-b",
+      title: "Untitled document",
+      content: "reassigned",
+      visibility: "private",
+    });
+    expect(docs[1]?.visibility).toBe("private");
+    expect(docs.map((doc) => doc.id)).toEqual([
+      "doc-a1",
+      "doc-legacy",
+      ...SEED_DOCS.filter((doc) => doc.id !== "doc-a1").map((doc) => doc.id),
+    ]);
+
+    // The default is durable: it survives the write-back and a reopen.
+    const reopened = new JsonStore(filePath);
+    await reopened.initialize();
+    expect(
+      reopened.snapshot().docs.find((doc) => doc.id === "doc-legacy"),
+    ).toEqual({
+      id: "doc-legacy",
+      ownerId: "user-b",
+      title: "Untitled document",
+      content: "written before visibility existed",
+      visibility: "private",
+    });
+  });
+
+  it("gives an Agent stored before ownership existed the default owner", async () => {
+    const filePath = await temporaryFile();
+    await writeFile(
+      filePath,
+      JSON.stringify({ version: 1, agents: [legacyAgent] }),
+      "utf8",
+    );
+
+    const store = new JsonStore(filePath);
+    await store.initialize();
+    expect(store.snapshot().agents[0]?.ownerId).toBe(DEFAULT_OWNER_ID);
+
+    // The backfill is durable: it survives the write-back and a reopen.
+    const reopened = new JsonStore(filePath);
+    await reopened.initialize();
+    expect(reopened.snapshot().agents[0]).toMatchObject({
+      id: "agent-1",
+      name: "Legacy",
+      ownerId: DEFAULT_OWNER_ID,
+    });
+  });
+
+  it("leaves an Agent that already has an owner alone", async () => {
+    const filePath = await temporaryFile();
+    await writeFile(
+      filePath,
+      JSON.stringify({
+        version: DATABASE_VERSION,
+        agents: [{ ...legacyAgent, ownerId: "user-b" }],
+      }),
+      "utf8",
+    );
+
+    const store = new JsonStore(filePath);
+    await store.initialize();
+    expect(store.snapshot().agents[0]?.ownerId).toBe("user-b");
+  });
+});
+
 describe("JsonStore", () => {
   it("does not publish a mutation in memory when persistence fails", async () => {
-    const root = await mkdtemp(path.join(tmpdir(), "launchpad-store-test-"));
-    temporaryDirectories.push(root);
-    const originalPath = path.join(root, "db.json");
+    const originalPath = await temporaryFile();
     const store = new JsonStore(originalPath);
     await store.initialize();
 
     const mutableStore = store as unknown as { filePath: string };
-    mutableStore.filePath = path.join(root, "missing-directory", "db.json");
+    mutableStore.filePath = path.join(
+      path.dirname(originalPath),
+      "missing-directory",
+      "db.json",
+    );
     await expect(
       store.mutate((database) => {
         database.messages.push({
