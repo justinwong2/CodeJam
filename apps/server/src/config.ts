@@ -22,6 +22,11 @@ const envSchema = z.object({
   // hardcoded coupling produced (600_000 + 60_000), so naming it changed
   // nothing about how long a session lives.
   SESSION_TTL_MS: z.coerce.number().int().min(1_000).default(660_000),
+  // How many gateway decisions the store keeps. Evidence is the busiest write
+  // in the system and the only unbounded one, so it gets a cap rather than a
+  // disk that fills. The floor is ten: a bound so tight that a single run's
+  // decisions cannot fit is a retention policy that erases what it is for.
+  AUDIT_RETENTION_LIMIT: z.coerce.number().int().min(10).default(1000),
   CODEX_MAX_OUTPUT_BYTES: z.coerce
     .number()
     .int()
@@ -141,6 +146,7 @@ export function loadConfig(environment: NodeJS.ProcessEnv = process.env) {
     codexSandboxMode: env.CODEX_SANDBOX_MODE,
     codexTimeoutMs: env.CODEX_TIMEOUT_MS,
     sessionTtlMs: env.SESSION_TTL_MS,
+    auditRetentionLimit: env.AUDIT_RETENTION_LIMIT,
     codexMaxOutputBytes: env.CODEX_MAX_OUTPUT_BYTES,
     runtimeProvider: env.RUNTIME_PROVIDER,
     containerEngine: env.CONTAINER_ENGINE,

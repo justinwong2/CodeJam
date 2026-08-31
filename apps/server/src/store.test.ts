@@ -2,8 +2,15 @@ import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { DATABASE_VERSION, JsonStore, SEED_DOCS, SEED_USERS } from "./store.js";
+import {
+  auditFilePath,
+  DATABASE_VERSION,
+  JsonStore,
+  SEED_DOCS,
+  SEED_USERS,
+} from "./store.js";
 import { DEFAULT_OWNER_ID } from "./types.js";
+import type { AuditRecord } from "./types.js";
 
 const temporaryDirectories: string[] = [];
 
@@ -25,6 +32,23 @@ const legacyAgent = {
   createdAt: "2026-08-01T00:00:00.000Z",
   updatedAt: "2026-08-01T00:00:00.000Z",
 };
+
+const auditRecord = (id: string): AuditRecord => ({
+  id,
+  ts: "2026-08-02T00:00:00.000Z",
+  humanId: "user-a",
+  agentId: "agent-1",
+  runId: "run-1",
+  tool: "docs",
+  resource: "docs/doc-a1",
+  decision: "allow",
+  reason: 'Role "admin" grants the docs tool',
+});
+
+const auditLines = async (filePath: string): Promise<string[]> =>
+  (await readFile(auditFilePath(filePath), "utf8"))
+    .split("\n")
+    .filter((line) => line.length > 0);
 
 afterEach(async () => {
   await Promise.all(
@@ -107,17 +131,7 @@ describe("JsonStore migration", () => {
 
   it("carries stored audit records forward without a version bump", async () => {
     const filePath = await temporaryFile();
-    const record = {
-      id: "audit-1",
-      ts: "2026-08-02T00:00:00.000Z",
-      humanId: "user-a",
-      agentId: "agent-1",
-      runId: "run-1",
-      tool: "docs" as const,
-      resource: "docs/doc-a1",
-      decision: "allow" as const,
-      reason: 'Role "admin" grants the docs tool',
-    };
+    const record = auditRecord("audit-1");
     await writeFile(
       filePath,
       JSON.stringify({ version: 1, agents: [legacyAgent] }),
@@ -127,7 +141,7 @@ describe("JsonStore migration", () => {
     const store = new JsonStore(filePath);
     await store.initialize();
     expect(store.snapshot().audit).toEqual([]);
-    await store.mutate((database) => database.audit.push(record));
+    await store.appendAudit(record);
 
     // Evidence outlives the process that wrote it, or it is not evidence.
     const reopened = new JsonStore(filePath);
@@ -361,5 +375,280 @@ describe("JsonStore", () => {
     expect(store.snapshot().messages.map((message) => message.content)).toEqual(
       ["queue recovered"],
     );
+  });
+});
+
+describe("Audit sidecar", () => {
+  it("appends a decision without rewriting the database", async () => {
+    const filePath = await temporaryFile();
+    const store = new JsonStore(filePath);
+    await store.initialize();
+    await store.mutate((database) => {
+      database.messages.push({
+        id: "message-1",
+        agentId: "agent-1",
+        runId: "run-1",
+        role: "user",
+        content: "anything at all",
+        createdAt: "2026-08-02T00:00:00.000Z",
+      });
+    });
+    const before = await readFile(filePath, "utf8");
+
+    await store.appendAudit(auditRecord("audit-1"));
+    await store.appendAudit(auditRecord("audit-2"));
+    await store.appendAudit(auditRecord("audit-3"));
+
+    // The point of the sidecar: the busiest write in the system costs one
+    // append, so the database file is not touched at all.
+    expect(await readFile(filePath, "utf8")).toBe(before);
+    expect(await auditLines(filePath)).toHaveLength(3);
+    expect(Object.keys(JSON.parse(before) as object)).not.toContain("audit");
+    expect(store.snapshot().audit.map((record) => record.id)).toEqual([
+      "audit-1",
+      "audit-2",
+      "audit-3",
+    ]);
+  });
+
+  it("reads appended decisions back, in order, in a new process", async () => {
+    const filePath = await temporaryFile();
+    const store = new JsonStore(filePath);
+    await store.initialize();
+    for (const id of ["audit-1", "audit-2", "audit-3"]) {
+      await store.appendAudit(auditRecord(id));
+    }
+
+    const reopened = new JsonStore(filePath);
+    await reopened.initialize();
+    expect(reopened.snapshot().audit).toEqual([
+      auditRecord("audit-1"),
+      auditRecord("audit-2"),
+      auditRecord("audit-3"),
+    ]);
+  });
+
+  it("migrates audit records out of a legacy database into the sidecar", async () => {
+    const filePath = await temporaryFile();
+    await writeFile(
+      filePath,
+      JSON.stringify({
+        version: DATABASE_VERSION,
+        agents: [legacyAgent],
+        audit: [auditRecord("audit-1"), auditRecord("audit-2")],
+      }),
+      "utf8",
+    );
+
+    const store = new JsonStore(filePath);
+    await store.initialize();
+    expect(store.snapshot().audit.map((record) => record.id)).toEqual([
+      "audit-1",
+      "audit-2",
+    ]);
+
+    // The records moved rather than being copied: the rewritten database no
+    // longer carries them, and the sidecar does.
+    const onDisk = JSON.parse(await readFile(filePath, "utf8")) as object;
+    expect(Object.keys(onDisk)).not.toContain("audit");
+    expect(await auditLines(filePath)).toHaveLength(2);
+
+    // A second start migrates nothing, so it cannot duplicate anything.
+    const reopened = new JsonStore(filePath);
+    await reopened.initialize();
+    expect(reopened.snapshot().audit.map((record) => record.id)).toEqual([
+      "audit-1",
+      "audit-2",
+    ]);
+    expect(await auditLines(filePath)).toHaveLength(2);
+  });
+
+  it("skips a torn final line rather than refusing to start", async () => {
+    const filePath = await temporaryFile();
+    await writeFile(
+      auditFilePath(filePath),
+      JSON.stringify(auditRecord("audit-1")) +
+        "\n" +
+        JSON.stringify(auditRecord("audit-2")) +
+        "\n" +
+        '{"id":"audit-3","ts":"2026-08-02T00:00',
+      "utf8",
+    );
+
+    const store = new JsonStore(filePath);
+    await store.initialize();
+    // A crash mid-append must cost the record it was writing and nothing else.
+    expect(store.snapshot().audit.map((record) => record.id)).toEqual([
+      "audit-1",
+      "audit-2",
+    ]);
+  });
+
+  it("loses nothing when appends and mutations are issued together", async () => {
+    const filePath = await temporaryFile();
+    const store = new JsonStore(filePath);
+    await store.initialize();
+
+    // `mutate` clones the database and swaps the clone in, so an append that
+    // ran beside it would vanish. The shared queue is what makes this safe.
+    for (let index = 0; index < 10; index += 1) {
+      await Promise.all([
+        store.appendAudit(auditRecord(`audit-${index}`)),
+        store.mutate((database) => {
+          database.messages.push({
+            id: `message-${index}`,
+            agentId: "agent-1",
+            runId: "run-1",
+            role: "user",
+            content: "concurrent",
+            createdAt: "2026-08-02T00:00:00.000Z",
+          });
+        }),
+      ]);
+    }
+
+    expect(store.snapshot().audit).toHaveLength(10);
+    expect(store.snapshot().messages).toHaveLength(10);
+    expect(await auditLines(filePath)).toHaveLength(10);
+
+    const reopened = new JsonStore(filePath);
+    await reopened.initialize();
+    expect(reopened.snapshot().audit).toHaveLength(10);
+    expect(reopened.snapshot().messages).toHaveLength(10);
+  });
+});
+
+describe("Audit retention", () => {
+  // Small enough that the file threshold (four times the limit) is reachable in
+  // a test, and the shape of the rule is the same at 5 as it is at 1000.
+  const LIMIT = 5;
+
+  const ids = (store: JsonStore): string[] =>
+    store.snapshot().audit.map((record) => record.id);
+
+  const range = (from: number, to: number): string[] =>
+    Array.from(
+      { length: to - from + 1 },
+      (_, index) => `audit-${from + index}`,
+    );
+
+  it("keeps the newest records once the limit is passed", async () => {
+    const filePath = await temporaryFile();
+    const store = new JsonStore(filePath, LIMIT);
+    await store.initialize();
+
+    for (const id of range(1, LIMIT + 3)) {
+      await store.appendAudit(auditRecord(id));
+    }
+
+    // Retention drops the oldest first: what an operator is asked about is
+    // nearly always the decision that just happened.
+    expect(ids(store)).toEqual(range(4, 8));
+  });
+
+  it("brings a file that outgrew the limit back under it on the next start", async () => {
+    const filePath = await temporaryFile();
+    const store = new JsonStore(filePath, LIMIT);
+    await store.initialize();
+    for (const id of range(1, LIMIT + 3)) {
+      await store.appendAudit(auditRecord(id));
+    }
+    // Eviction is in memory, so the appends alone left all eight on disk.
+    expect(await auditLines(filePath)).toHaveLength(LIMIT + 3);
+
+    const reopened = new JsonStore(filePath, LIMIT);
+    await reopened.initialize();
+
+    expect(ids(reopened)).toEqual(range(4, 8));
+    expect(await auditLines(filePath)).toHaveLength(LIMIT);
+    expect(reopened.snapshot().audit).toEqual(
+      range(4, 8).map((id) => auditRecord(id)),
+    );
+  });
+
+  it("compacts the sidecar once it grows past the file threshold", async () => {
+    const filePath = await temporaryFile();
+    const store = new JsonStore(filePath, LIMIT);
+    await store.initialize();
+
+    for (const id of range(1, 4 * LIMIT)) {
+      await store.appendAudit(auditRecord(id));
+    }
+    // Still under the threshold: the sidecar's whole point is one append per
+    // decision, so it is allowed to carry dead lines up to that bound.
+    expect(await auditLines(filePath)).toHaveLength(4 * LIMIT);
+
+    await store.appendAudit(auditRecord("audit-21"));
+
+    // The append that crossed it rewrote the file to exactly what is in memory.
+    expect(await auditLines(filePath)).toHaveLength(LIMIT);
+    expect(
+      (await auditLines(filePath)).map(
+        (line) => (JSON.parse(line) as AuditRecord).id,
+      ),
+    ).toEqual(ids(store));
+    expect(ids(store)).toEqual(range(17, 21));
+
+    // The counter reset with the file: the next appends compact no sooner than
+    // the threshold allows, rather than on every one.
+    await store.appendAudit(auditRecord("audit-22"));
+    expect(await auditLines(filePath)).toHaveLength(LIMIT + 1);
+  });
+
+  it("trims a hand-written sidecar to the limit at boot", async () => {
+    const filePath = await temporaryFile();
+    await writeFile(
+      auditFilePath(filePath),
+      range(1, 12)
+        .map((id) => JSON.stringify(auditRecord(id)) + "\n")
+        .join(""),
+      "utf8",
+    );
+
+    const store = new JsonStore(filePath, LIMIT);
+    await store.initialize();
+
+    expect(ids(store)).toEqual(range(8, 12));
+    expect(await auditLines(filePath)).toHaveLength(LIMIT);
+    expect(
+      (await auditLines(filePath)).map(
+        (line) => (JSON.parse(line) as AuditRecord).id,
+      ),
+    ).toEqual(range(8, 12));
+  });
+
+  it("applies the limit to records migrated out of a legacy database", async () => {
+    const filePath = await temporaryFile();
+    await writeFile(
+      filePath,
+      JSON.stringify({
+        version: DATABASE_VERSION,
+        agents: [legacyAgent],
+        audit: range(1, 4).map((id) => auditRecord(id)),
+      }),
+      "utf8",
+    );
+    await writeFile(
+      auditFilePath(filePath),
+      range(5, 8)
+        .map((id) => JSON.stringify(auditRecord(id)) + "\n")
+        .join(""),
+      "utf8",
+    );
+
+    const store = new JsonStore(filePath, LIMIT);
+    await store.initialize();
+
+    // The legacy records are the older half, so the cap falls across the seam:
+    // the surviving five are the last legacy record and the whole sidecar.
+    expect(ids(store)).toEqual(range(4, 8));
+    expect(
+      (await auditLines(filePath)).map(
+        (line) => (JSON.parse(line) as AuditRecord).id,
+      ),
+    ).toEqual(range(4, 8));
+    expect(
+      Object.keys(JSON.parse(await readFile(filePath, "utf8")) as object),
+    ).not.toContain("audit");
   });
 });

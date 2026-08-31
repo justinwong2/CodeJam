@@ -10,7 +10,10 @@ import { WorkspaceManager } from "./workspace.js";
 // origin Codex must call differs between a host process and a container.
 const config = loadConfig();
 
-const store = new JsonStore(path.join(config.dataDirectory, "launchpad.json"));
+const store = new JsonStore(
+  path.join(config.dataDirectory, "launchpad.json"),
+  config.auditRetentionLimit,
+);
 const workspaces = new WorkspaceManager(
   config.workspaceRoot,
   runnerGatewayBaseUrl(config),

@@ -480,11 +480,12 @@ export class AgentService implements GatewayDirectory {
   /**
    * Files one gateway decision. The gateway awaits this before it answers, so
    * an agent never learns the outcome of a call the store has not recorded.
+   * `appendAudit` costs one line appended to the audit sidecar rather than a
+   * rewrite of the whole database, which matters because this is the busiest
+   * write in the system and it sits in front of every agent's answer.
    */
   async appendAuditRecord(record: AuditRecord): Promise<void> {
-    await this.store.mutate((database) => {
-      database.audit.push(record);
-    });
+    await this.store.appendAudit(record);
   }
 
   /** The live session behind a run credential, looked up by its `jti`. */
