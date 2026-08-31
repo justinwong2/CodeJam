@@ -5,11 +5,13 @@ on:
     branches: [main]
   pull_request:
 
-# Cancel superseded runs on the same branch; hackathon iteration is fast and
-# stale runs only burn minutes.
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
+
+permissions:
+  contents: read
+  pull-requests: read
 
 jobs:
   check:
