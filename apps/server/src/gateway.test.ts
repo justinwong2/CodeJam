@@ -8,6 +8,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { AgentService } from "./agent-service.js";
 import { createApp } from "./app.js";
 import { loadConfig } from "./config.js";
+import { clearOwnerMeters, resetRunMeters } from "./gateway.js";
 import { signRunJwt, type RunJwtClaims } from "./run-jwt.js";
 import { JsonStore } from "./store.js";
 import type {
@@ -47,10 +48,28 @@ const stubAudit: AuditRecord[] = [];
  */
 const stubRoles = new Map<string, Role>();
 
+/**
+ * The ceiling and the settled spend the store would hold. Both default to the
+ * unbounded case so every test that is not about budgets is unaffected by one.
+ */
+const stubBudgets = new Map<string, number>();
+const stubSettledTokens = new Map<string, number>();
+
+/**
+ * Runs whose real usage has landed. A Run in this set has been measured, so the
+ * gateway's estimate for it must stop counting — otherwise the same tokens are
+ * charged twice, once guessed and once exact.
+ */
+const stubSettledRuns = new Set<string>();
+
 /** The control-plane half of the credential: only these sessions are live. */
 function serviceWith(...sessions: RunSession[]): AgentService {
   stubAudit.length = 0;
   stubRoles.clear();
+  stubBudgets.clear();
+  stubSettledTokens.clear();
+  stubSettledRuns.clear();
+  resetRunMeters();
   return {
     listAgents: () => [],
     systemInfo: async () => ({}),
@@ -66,7 +85,15 @@ function serviceWith(...sessions: RunSession[]): AgentService {
       id,
       name: id,
       role: stubRoles.get(id) ?? "admin",
+      tokenBudget: stubBudgets.get(id) ?? 0,
+      budgetResetAt: null,
     }),
+    // Settled spend, as completed Runs would have reported it. Zero unless a
+    // test says otherwise, so the ceiling is only ever the subject of the
+    // tests that are about it.
+    sumOwnerTokens: (ownerId: string): number =>
+      stubSettledTokens.get(ownerId) ?? 0,
+    hasRunSettled: (runId: string): boolean => stubSettledRuns.has(runId),
     appendAuditRecord: async (record: AuditRecord) => {
       stubAudit.push(record);
     },
@@ -505,6 +532,322 @@ describe("Model gateway", () => {
     expect(body).toContain('event: chunk\ndata: {"delta":"one"}\n\n');
     expect(body).toContain('event: chunk\ndata: {"delta":"two"}\n\n');
     expect(body).toContain("event: done\ndata: [DONE]\n\n");
+    await app.close();
+  });
+});
+
+describe("Model gateway token budget", () => {
+  afterEach(closeOpenServers);
+
+  /** A model call of a known size, so a test can spend a predictable amount. */
+  const callModel = (app: FastifyInstance, session: RunSession, padding = 0) =>
+    app.inject({
+      method: "POST",
+      url: "/gateway/v1/responses",
+      headers: {
+        "content-type": "application/json",
+        authorization: `Bearer ${credentialFor(session)}`,
+      },
+      payload: JSON.stringify({ model: "ep-test", input: "x".repeat(padding) }),
+    });
+
+  it("forwards while the owner is under the ceiling, and says how much is left", async () => {
+    const upstream = await startEchoUpstream();
+    const session = liveSession();
+    const app = await createApp(
+      configFor(upstream.baseUrl),
+      serviceWith(session),
+    );
+    stubBudgets.set("user-a", 1_000_000);
+
+    const response = await callModel(app, session);
+
+    expect(response.statusCode).toBe(200);
+    expect(upstream.calls).toHaveLength(1);
+    // The running total rides in the allow record's reason, so the evidence
+    // panel shows spend climbing rather than a refusal arriving from nowhere.
+    expect(stubAudit).toHaveLength(1);
+    expect(stubAudit[0]?.decision).toBe("allow");
+    expect(stubAudit[0]?.reason).toContain("1,000,000");
+    await app.close();
+  });
+
+  it("denies with 402 once settled spend has used the ceiling up, and never calls Ark", async () => {
+    const upstream = await startEchoUpstream();
+    const session = liveSession();
+    const app = await createApp(
+      configFor(upstream.baseUrl),
+      serviceWith(session),
+    );
+    stubBudgets.set("user-a", 1_000);
+    stubSettledTokens.set("user-a", 1_000);
+
+    const response = await callModel(app, session);
+
+    // 402, not 403: the call was authorized and refused anyway.
+    expect(response.statusCode).toBe(402);
+    expect((response.json() as { error: string }).error).toContain("exhausted");
+    // The half that makes it enforcement rather than metering: the Ark key was
+    // never spent, so there is nothing to reconcile afterwards.
+    expect(upstream.calls).toEqual([]);
+    expect(stubAudit).toHaveLength(1);
+    expect(stubAudit[0]).toMatchObject({ tool: "model", decision: "deny" });
+    expect(stubAudit[0]?.reason).toContain("exhausted");
+    await app.close();
+  });
+
+  it("stops a Run that is spending right now, not after it has finished", async () => {
+    // The failure the ceiling exists for. Settled spend is zero throughout —
+    // a Run reports usage only when it completes — so a ceiling counting only
+    // finished Runs would forward every one of these.
+    const upstream = await startEchoUpstream();
+    const session = liveSession();
+    const app = await createApp(
+      configFor(upstream.baseUrl),
+      serviceWith(session),
+    );
+    // Padding of 4n bytes is about n estimated tokens.
+    stubBudgets.set("user-a", 2_500);
+
+    const first = await callModel(app, session, 4_000);
+    const second = await callModel(app, session, 4_000);
+    const third = await callModel(app, session, 4_000);
+
+    expect(first.statusCode).toBe(200);
+    expect(second.statusCode).toBe(200);
+    expect(third.statusCode).toBe(402);
+    expect(upstream.calls).toHaveLength(2);
+    expect(stubAudit.map((record) => record.decision)).toEqual([
+      "allow",
+      "allow",
+      "deny",
+    ]);
+    await app.close();
+  });
+
+  it("adds up the calls a Run makes, because each one costs something", async () => {
+    // Measured against real usage: a Run making ten calls cost ~50,000 tokens
+    // where its largest single call was ~5,000. Ark resumes the thread
+    // server-side, so a request carries its own turn rather than the whole
+    // conversation — taking a maximum here would under-count tenfold.
+    const upstream = await startEchoUpstream();
+    const session = liveSession();
+    const app = await createApp(
+      configFor(upstream.baseUrl),
+      serviceWith(session),
+    );
+    stubBudgets.set("user-a", 10_000);
+
+    // Ten calls at ~1,000 estimated apiece is ~10,000 — the ceiling exactly.
+    for (let call = 0; call < 9; call += 1) {
+      expect((await callModel(app, session, 4_000)).statusCode).toBe(200);
+    }
+    expect((await callModel(app, session, 4_000)).statusCode).toBe(402);
+
+    expect(upstream.calls).toHaveLength(9);
+    await app.close();
+  });
+
+  it("charges only what was forwarded, so a denial does not deepen the debt", async () => {
+    const upstream = await startEchoUpstream();
+    const session = liveSession();
+    const app = await createApp(
+      configFor(upstream.baseUrl),
+      serviceWith(session),
+    );
+    stubBudgets.set("user-a", 2_500);
+
+    await callModel(app, session, 4_000);
+    await callModel(app, session, 4_000);
+    expect((await callModel(app, session, 4_000)).statusCode).toBe(402);
+    // A refused call costs nothing, so a ceiling raised by one call's worth
+    // admits exactly one more rather than being swallowed by a phantom charge.
+    stubBudgets.set("user-a", 3_500);
+    expect((await callModel(app, session, 4_000)).statusCode).toBe(200);
+
+    expect(upstream.calls).toHaveLength(3);
+    await app.close();
+  });
+
+  it("forgets what another Run of the same owner had spent when spend is reset", async () => {
+    // A Run that stopped without reporting usage leaves its estimate standing —
+    // it is the only account of what it spent. Resetting is what clears it, and
+    // the next Run of that owner starts from what it alone is spending.
+    const upstream = await startEchoUpstream();
+    const earlier = liveSession();
+    const current = liveSession({
+      runId: "run-2",
+      agentId: "agent-1",
+      jwtId: "session-2",
+    });
+    const app = await createApp(
+      configFor(upstream.baseUrl),
+      serviceWith(earlier, current),
+    );
+    stubBudgets.set("user-a", 2_500);
+
+    // The earlier Run leaves ~2,000 estimated behind it.
+    await callModel(app, earlier, 8_000);
+    // Which is enough to refuse the next Run's very first call.
+    expect((await callModel(app, current, 4_000)).statusCode).toBe(402);
+
+    clearOwnerMeters("user-a");
+
+    expect((await callModel(app, current, 4_000)).statusCode).toBe(200);
+    expect(upstream.calls).toHaveLength(2);
+    await app.close();
+  });
+
+  it("clears only the owner whose spend was reset", async () => {
+    const upstream = await startEchoUpstream();
+    const mine = liveSession();
+    const theirs = liveSession({
+      runId: "run-2",
+      agentId: "agent-2",
+      ownerId: "user-b",
+      jwtId: "session-2",
+    });
+    const app = await createApp(
+      configFor(upstream.baseUrl),
+      serviceWith(mine, theirs),
+    );
+    stubSettledTokens.set("user-a", 1_600);
+    stubSettledTokens.set("user-b", 1_600);
+    stubBudgets.set("user-a", 2_500);
+    stubBudgets.set("user-b", 2_500);
+
+    // Both owners are close enough to their ceiling that a call tips them over.
+    expect((await callModel(app, mine, 4_000)).statusCode).toBe(402);
+    expect((await callModel(app, theirs, 4_000)).statusCode).toBe(402);
+
+    // Only one of them is forgiven.
+    stubSettledTokens.set("user-a", 0);
+    clearOwnerMeters("user-a");
+
+    expect((await callModel(app, mine, 4_000)).statusCode).toBe(200);
+    expect((await callModel(app, theirs, 4_000)).statusCode).toBe(402);
+    await app.close();
+  });
+
+  it("lets a raised ceiling take effect on the very next call", async () => {
+    // The operator's lever, same shape as a role change: a store write that the
+    // next gateway call reads. No restart, and no token event of any kind.
+    const upstream = await startEchoUpstream();
+    const session = liveSession();
+    const app = await createApp(
+      configFor(upstream.baseUrl),
+      serviceWith(session),
+    );
+    stubBudgets.set("user-a", 1_000);
+    stubSettledTokens.set("user-a", 1_000);
+
+    expect((await callModel(app, session)).statusCode).toBe(402);
+    stubBudgets.set("user-a", 100_000);
+    expect((await callModel(app, session)).statusCode).toBe(200);
+
+    expect(upstream.calls).toHaveLength(1);
+    await app.close();
+  });
+
+  it("holds one owner's spending against another owner's ceiling not at all", async () => {
+    // The ceiling is the human's, so one owner exhausting theirs must not
+    // refuse an Agent belonging to somebody else.
+    const upstream = await startEchoUpstream();
+    const mine = liveSession();
+    const theirs = liveSession({
+      runId: "run-2",
+      agentId: "agent-2",
+      ownerId: "user-b",
+      jwtId: "session-2",
+    });
+    const app = await createApp(
+      configFor(upstream.baseUrl),
+      serviceWith(mine, theirs),
+    );
+    stubBudgets.set("user-a", 1_000);
+    stubSettledTokens.set("user-a", 1_000);
+    stubBudgets.set("user-b", 100_000);
+
+    expect((await callModel(app, mine)).statusCode).toBe(402);
+    expect((await callModel(app, theirs)).statusCode).toBe(200);
+    await app.close();
+  });
+
+  it("forwards without limit when no ceiling is set", async () => {
+    // The seeded default for a human the store predates. A budget nobody
+    // configured must not strand every Agent on the platform.
+    const upstream = await startEchoUpstream();
+    const session = liveSession();
+    const app = await createApp(
+      configFor(upstream.baseUrl),
+      serviceWith(session),
+    );
+    stubBudgets.set("user-a", 0);
+    stubSettledTokens.set("user-a", 10_000_000);
+
+    const response = await callModel(app, session, 40_000);
+
+    expect(response.statusCode).toBe(200);
+    expect(upstream.calls).toHaveLength(1);
+    await app.close();
+  });
+
+  it("stops estimating a Run once its real usage has landed", async () => {
+    // The double-count this guards: an estimate and a measurement of the same
+    // tokens. Nothing tells the gateway a Run ended, so a finished Run's meter
+    // would otherwise stand for its whole TTL — while the store already holds
+    // what that Run really cost.
+    const upstream = await startEchoUpstream();
+    const finished = liveSession();
+    const next = liveSession({
+      runId: "run-2",
+      agentId: "agent-1",
+      jwtId: "session-2",
+    });
+    const app = await createApp(
+      configFor(upstream.baseUrl),
+      serviceWith(finished, next),
+    );
+    stubBudgets.set("user-a", 2_500);
+
+    // The first Run leaves ~2,000 estimated behind it.
+    await callModel(app, finished, 8_000);
+    expect((await callModel(app, next, 4_000)).statusCode).toBe(402);
+
+    // It then reports what it actually cost — less than the guess, as an
+    // estimate blind to caching tends to be. The measurement supersedes the
+    // estimate rather than stacking on top of it.
+    stubSettledRuns.add("run-1");
+    stubSettledTokens.set("user-a", 400);
+
+    const afterSettling = await callModel(app, next, 4_000);
+
+    // 400 settled + ~1,000 for this call, against 2,500. Had the estimate kept
+    // counting, it would be ~3,400 and refused.
+    expect(afterSettling.statusCode).toBe(200);
+    expect(upstream.calls).toHaveLength(2);
+    await app.close();
+  });
+
+  it("refuses a suspended owner by role, not by budget", async () => {
+    // Ordering: the coarser failure names itself first. "They may not" and
+    // "they cannot afford to" are different facts and must not be confused in
+    // the trail an operator reads.
+    const upstream = await startEchoUpstream();
+    const session = liveSession();
+    const app = await createApp(
+      configFor(upstream.baseUrl),
+      serviceWith(session),
+    );
+    stubRoles.set("user-a", "suspended");
+    stubBudgets.set("user-a", 1);
+    stubSettledTokens.set("user-a", 1_000_000);
+
+    const response = await callModel(app, session);
+
+    expect(response.statusCode).toBe(403);
+    expect(stubAudit[0]?.reason).toContain("may not use the model tool");
+    expect(upstream.calls).toEqual([]);
     await app.close();
   });
 });
