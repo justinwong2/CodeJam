@@ -159,7 +159,7 @@ permissions are read from the store per call and were never in the credential.
 
 ---
 
-## Caption for the one-page submission
+## In one paragraph
 
 > The baseline routed the Agent Runtime directly to Ark, which required the API
 > key inside a container that runs arbitrary shell commands. We replaced that
@@ -175,15 +175,20 @@ permissions are read from the store per call and were never in the credential.
 
 ---
 
-## Exporting the one-pager
+## Reproducing this diagram
 
-The fenced block above is the single source. To produce a PNG or PDF:
+A rendered copy is committed at [assets/architecture.pdf](assets/architecture.pdf),
+one page, for reading away from a Markdown viewer.
 
-- **Easiest:** paste the block into <https://mermaid.live> and export SVG or PNG.
-- **CLI:** `npx @mermaid-js/mermaid-cli -i architecture.mmd -o architecture.png -w 2800`
-  (extract the fenced block to a `.mmd` file first).
+The fenced Mermaid block above remains the single source — the PDF is generated
+from it and is never edited directly. To regenerate after changing the block,
+extract it to `architecture.mmd` and run:
 
-If the export is too cramped for one page, drop the six numbered nodes inside the
-gateway to a single box reading _"authenticate → authorize → budget → audit →
-inject"_ and let the enforcement table above carry the detail. Keep, in order of
-importance: the three trust zones, the removed red path, and the gateway box.
+```bash
+npx -y @mermaid-js/mermaid-cli \
+  -i architecture.mmd -o docs/assets/architecture.pdf --pdfFit -b white
+```
+
+`--pdfFit` is what keeps it to one page; `-b white` avoids a transparent
+background that prints grey. Pasting the block into <https://mermaid.live>
+exports the same thing by hand.

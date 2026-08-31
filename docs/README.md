@@ -5,13 +5,13 @@ updated when behavior changes.
 
 ## Current Operational Docs
 
-| Doc                                      | Canonical for                                 |
-| ---------------------------------------- | --------------------------------------------- |
-| [../README.md](../README.md)             | Human quick start, setup SOP, config summary  |
-| [../CLAUDE.md](../CLAUDE.md)             | Agent implementation guide, invariants, seams |
-| [../AGENTS.md](../AGENTS.md)             | Condensed agent rules and review checklist    |
-| [../SECURITY.md](../SECURITY.md)         | Security policy and accepted POC limitations  |
-| [../CONTRIBUTING.md](../CONTRIBUTING.md) | Contribution workflow                         |
+| Doc                                      | Canonical for                                                                                          |
+| ---------------------------------------- | ------------------------------------------------------------------------------------------------------ |
+| [../README.md](../README.md)             | The middleware problem and rationale, human quick start, demo steps, config summary, known limitations |
+| [../CLAUDE.md](../CLAUDE.md)             | Agent implementation guide, invariants, seams                                                          |
+| [../AGENTS.md](../AGENTS.md)             | Condensed agent rules and review checklist                                                             |
+| [../SECURITY.md](../SECURITY.md)         | Security policy and accepted POC limitations                                                           |
+| [../CONTRIBUTING.md](../CONTRIBUTING.md) | Contribution workflow                                                                                  |
 
 ## Architecture And Operations
 
@@ -59,7 +59,10 @@ plan against them — notably, they say "choose exactly one middleware track,"
 a rule the final brief replaced with "recommended examples, not a prescribed
 checklist." Prettier is configured to ignore the XML files.
 
-`assets/` holds README screenshots.
+`assets/` holds the README screenshots and `architecture.pdf`, the rendered
+one-page diagram. That PDF is **generated**, never hand-edited: its source is the
+Mermaid block in [ARCHITECTURE_DIAGRAM.md](ARCHITECTURE_DIAGRAM.md), and it is
+regenerated whenever that block changes.
 
 ## Historical / Archived Docs
 
