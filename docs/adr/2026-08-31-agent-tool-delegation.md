@@ -15,9 +15,9 @@ every tool its owner could use.
 The run JWT cannot solve this safely. It identifies a Run and Agent, but putting
 permissions in it would make a grant change wait for token expiry. The gateway
 already resolves the Agent and owner from the store on every call
-([gateway.ts:494-519](../../apps/server/src/gateway.ts)); `Agent.toolGrants` in
-[types.ts:74-78](../../apps/server/src/types.ts) can cross that existing
-boundary.
+(`resolvePrincipal` in [gateway.ts](../../apps/server/src/gateway.ts));
+`Agent.toolGrants` in [types.ts](../../apps/server/src/types.ts) can cross that
+existing boundary.
 
 Constraints: preserve legacy Agents and the baseline, keep authorization in one
 pure `can()` entry point, retain live mid-run policy changes, and add no new
@@ -30,13 +30,13 @@ owner's role; an array is an explicit Agent-specific ceiling, and `[]` grants
 nothing. Effective access is the intersection of the owner's current role and
 the Agent's current grants, followed by resource visibility and model budget.
 
-- **Boundary:** [`authz.ts:48-81`](../../apps/server/src/authz.ts) decides;
+- **Boundary:** `can()` in [authz.ts](../../apps/server/src/authz.ts) decides;
   `gateway.ts` resolves both policy inputs from the store on every model or tool
   call.
 - **Data crossing it:** the resolved `Principal` carries owner `role` and Agent
   `toolGrants`. Neither is carried in the run JWT. Existing Agent create/update
-  routes accept the field through
-  [agent-service.ts:247-306](../../apps/server/src/agent-service.ts), and the
+  routes accept the field through `createAgent` and `updateAgent` in
+  [agent-service.ts](../../apps/server/src/agent-service.ts), and the
   settings UI triggers those routes. The UI obtains its available choices from
   the server's `ROLE_TOOLS` projection on `GET /api/users`; it does not carry a
   second tool list, and therefore never offers a tool the selected owner role
