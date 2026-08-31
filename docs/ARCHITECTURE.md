@@ -151,7 +151,8 @@ Interrupted Runs become `cancelled` after a restart.
 ### Storage
 
 ```text
-data/launchpad.json       Agent, message, Run, session, and audit records
+data/launchpad.json       Agent, message, Run, session, and document records
+data/launchpad.audit.jsonl  Gateway decisions, one JSON line each
 workspaces/AgentID/       Agent-created files
 workspaces/.deleted/      Archived deleted workspaces
 codex-home/               Codex configuration and sessions
@@ -159,6 +160,20 @@ codex-home/               Codex configuration and sessions
 
 `JsonStore` serializes writes and atomically replaces one JSON file. It supports
 one process only.
+
+Audit records are the exception, and deliberately so: they are the
+highest-frequency write in the system — one per gateway decision, awaited in
+front of every agent's answer — so keeping them in `launchpad.json` made
+authorizing one call cost a rewrite of the whole accumulated history. They live
+instead in an append-only sidecar whose path is derived from the database's, one
+line per decision, on the same write queue and with the same
+written-before-the-answer contract. A legacy database still carrying an `audit`
+array migrates into the sidecar at boot; a line torn by a crash mid-append is
+skipped. `AUDIT_RETENTION_LIMIT` (default `1000`) makes the trail a rolling
+window — newest kept, oldest evicted, the file compacted when it drifts far
+enough past the cap — which bounds how long a record is kept and never whether
+it is written. See
+[adr/2026-08-31-audit-sidecar-and-retention.md](adr/2026-08-31-audit-sidecar-and-retention.md).
 
 ### Runtime providers
 

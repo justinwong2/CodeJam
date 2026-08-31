@@ -93,6 +93,18 @@ credentials, personal data, or exploit details in an issue.
   smuggled into one. The trail still names humans, Agents, and what they were
   refused, so `GET /api/runs/:id/audit` sits behind `APP_AUTH_TOKEN` with the
   rest of `/api` and is never readable by an Agent.
+- The evidence is a rolling window, not a full history. Records are appended one
+  line at a time to a sidecar beside the database and retained up to
+  `AUDIT_RETENTION_LIMIT` (default 1000), with the oldest evicted first once the
+  cap is passed. Retention bounds how long a decision is kept, never whether it
+  is recorded — every decision is still written before the answer — but a busy
+  or long-lived deployment will lose its earliest decisions, and there is no
+  export, archive, or off-host shipping to catch them. Nothing signs or
+  chain-hashes the sidecar either, so anyone with write access to the data
+  directory can edit or truncate it undetected. Accepted for POC scope: the
+  demo's evidence is minutes old and the whole store is single-process and
+  local. A real deployment needs an append-only log with retention measured in
+  time, not count, and integrity protection the writing process cannot forge.
 - Run credentials are bearer tokens carried over plain HTTP between the Runtime
   container and the host gateway. They are per-run, revocable, and expire with
   the turn, but anyone who can read that local traffic during a run can replay

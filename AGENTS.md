@@ -48,7 +48,11 @@ Summary — canonical list is in [CLAUDE.md](CLAUDE.md#invariants-to-preserve).
     trusting it). Never a second copy: a drifting copy is how search leaks what a
     fetch hides.
 12. Every gateway decision leaves exactly one redacted audit record, written
-    before the answer is sent. No request or response body is persisted.
+    before the answer is sent. No request or response body is persisted. The
+    record is one line appended to the audit sidecar (`<db>.audit.jsonl`) rather
+    than a rewrite of `db.json`, and it is awaited before the answer just as the
+    old write was. `AUDIT_RETENTION_LIMIT` (default `1000`) bounds how long a
+    record is kept, never whether it is written.
 
 ## Repo Map
 
@@ -56,7 +60,7 @@ Summary — canonical list is in [CLAUDE.md](CLAUDE.md#invariants-to-preserve).
 | ------------------------------------------- | ------------------------------- |
 | `apps/server/src/app.ts`                    | Routes, request boundary        |
 | `apps/server/src/agent-service.ts`          | Orchestration, Run state        |
-| `apps/server/src/store.ts`                  | JSON persistence                |
+| `apps/server/src/store.ts`                  | JSON persistence, audit sidecar |
 | `apps/server/src/config.ts`                 | Env parsing and validation      |
 | `apps/server/src/types.ts`                  | Domain types, `AgentRunner`     |
 | `apps/server/src/codex-runner.ts`           | Codex as host process           |

@@ -38,7 +38,8 @@ Copy [TEMPLATE.md](TEMPLATE.md) to start a new record.
 
 ## Index
 
-| Date       | Decision                                                   | Status   |
-| ---------- | ---------------------------------------------------------- | -------- |
-| 2026-08-27 | [Agent Access Gateway](2026-08-27-agent-access-gateway.md) | Accepted |
-| 2026-08-30 | [Invisible Documents](2026-08-30-invisible-documents.md)   | Accepted |
+| Date       | Decision                                                                 | Status   |
+| ---------- | ------------------------------------------------------------------------ | -------- |
+| 2026-08-27 | [Agent Access Gateway](2026-08-27-agent-access-gateway.md)               | Accepted |
+| 2026-08-30 | [Invisible Documents](2026-08-30-invisible-documents.md)                 | Accepted |
+| 2026-08-31 | [Audit Sidecar And Retention](2026-08-31-audit-sidecar-and-retention.md) | Accepted |

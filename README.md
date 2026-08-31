@@ -259,6 +259,7 @@ cp deploy/volcengine/terraform.tfvars.example \
 | `CODEX_SANDBOX_MODE`      | `workspace-write`     | Codex inner sandbox mode.                                                                                                                                                                     |
 | `CODEX_TIMEOUT_MS`        | `600000`              | Maximum duration of one turn.                                                                                                                                                                 |
 | `SESSION_TTL_MS`          | `660000`              | How long a run's gateway credential stays usable. Revocation is immediate and does not wait for it.                                                                                           |
+| `AUDIT_RETENTION_LIMIT`   | `1000`                | How many gateway decisions the audit trail keeps, newest first. Bounds how long a record is kept, never whether it is written. Minimum 10.                                                    |
 | `LOCAL_POC_DATA_ROOT`     | Platform-specific     | Local metadata, workspace, and session directory.                                                                                                                                             |
 
 See [.env.example](.env.example) for all Runtime and resource-limit options.
