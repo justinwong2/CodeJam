@@ -6,7 +6,7 @@ import {
   writeFile,
 } from "node:fs/promises";
 import path from "node:path";
-import { DEFAULT_OWNER_ID } from "./types.js";
+import { DEFAULT_OWNER_ID, TOOL_NAMES } from "./types.js";
 import type {
   Agent,
   AgentRun,
@@ -15,6 +15,7 @@ import type {
   Message,
   MockDoc,
   RunSession,
+  ToolName,
   User,
 } from "./types.js";
 
@@ -26,9 +27,29 @@ export const DATABASE_VERSION = 2;
  * scores is authorization — so the two roles ship as fixtures rather than
  * something an operator creates.
  */
+/**
+ * Seeded budgets are a safety net, not policy: high enough that no ordinary
+ * demo Run meets them, so the ceiling is always on without ever being the
+ * reason something failed. The demo lowers one from the Operator Console,
+ * which is the point — the number is meant to be changed while running.
+ */
+const SEED_TOKEN_BUDGET = 5_000_000;
+
 export const SEED_USERS: User[] = [
-  { id: DEFAULT_OWNER_ID, name: "User A", role: "admin" },
-  { id: "user-b", name: "User B", role: "basic" },
+  {
+    id: DEFAULT_OWNER_ID,
+    name: "User A",
+    role: "admin",
+    tokenBudget: SEED_TOKEN_BUDGET,
+    budgetResetAt: null,
+  },
+  {
+    id: "user-b",
+    name: "User B",
+    role: "basic",
+    tokenBudget: SEED_TOKEN_BUDGET,
+    budgetResetAt: null,
+  },
 ];
 
 /**
@@ -128,6 +149,32 @@ function withVisibility(docs: MockDoc[]): MockDoc[] {
   }));
 }
 
+/**
+ * Humans stored before budgets existed are unlimited, and so is any value the
+ * file cannot account for. Unlike visibility, the safe direction here is the
+ * permissive one: a budget a loader had to guess must never silently strand
+ * every Agent an existing demo depends on. The ceiling is a guard against
+ * runaway spend, not a permission — `can()` already decided that part.
+ */
+function withBudgets(users: User[]): User[] {
+  return users.map((user) => ({
+    ...user,
+    tokenBudget:
+      typeof user.tokenBudget === "number" &&
+      Number.isFinite(user.tokenBudget) &&
+      user.tokenBudget > 0
+        ? user.tokenBudget
+        : 0,
+    // A watermark the file cannot account for means "never reset", which counts
+    // every Run — the conservative direction for this one, since inventing a
+    // reset would silently forgive spend nobody forgave.
+    budgetResetAt:
+      typeof user.budgetResetAt === "string" && user.budgetResetAt.length > 0
+        ? user.budgetResetAt
+        : null,
+  }));
+}
+
 /** Agents stored before ownership existed belong to the default owner. */
 function withOwners(agents: Agent[]): Agent[] {
   return agents.map((agent) =>
@@ -135,6 +182,30 @@ function withOwners(agents: Agent[]): Agent[] {
       ? agent
       : { ...agent, ownerId: DEFAULT_OWNER_ID },
   );
+}
+
+/**
+ * Agents stored before delegation existed inherit their owner's role. An
+ * explicit malformed value fails closed to no grants; a loader must not turn
+ * corrupt policy into broader authority. Valid arrays are deduplicated.
+ */
+function withToolGrants(agents: Agent[]): Agent[] {
+  const known = new Set<string>(TOOL_NAMES);
+  return agents.map((agent) => {
+    const stored = (agent as Agent & { toolGrants?: unknown }).toolGrants;
+    if (!("toolGrants" in agent) || stored === null) {
+      return { ...agent, toolGrants: null };
+    }
+    if (
+      !Array.isArray(stored) ||
+      !stored.every((tool): tool is ToolName =>
+        typeof tool === "string" ? known.has(tool) : false,
+      )
+    ) {
+      return { ...agent, toolGrants: [] };
+    }
+    return { ...agent, toolGrants: [...new Set(stored)] };
+  });
 }
 
 /**
@@ -157,11 +228,11 @@ export function migrateDatabase(parsed: unknown): Database {
   }
   return {
     version: DATABASE_VERSION,
-    agents: withOwners(collection<Agent>(source.agents)),
+    agents: withToolGrants(withOwners(collection<Agent>(source.agents))),
     messages: collection<Message>(source.messages),
     runs: collection<AgentRun>(source.runs),
     sessions: collection<RunSession>(source.sessions),
-    users: seeded(collection<User>(source.users), SEED_USERS),
+    users: seeded(withBudgets(collection<User>(source.users)), SEED_USERS),
     docs: seeded(withVisibility(collection<MockDoc>(source.docs)), SEED_DOCS),
     audit: collection<AuditRecord>(source.audit),
   };

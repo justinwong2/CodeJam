@@ -79,6 +79,7 @@ describe("JsonStore migration", () => {
     expect(migrated.version).toBe(DATABASE_VERSION);
     expect(migrated.sessions).toEqual([]);
     expect(migrated.agents.map((agent) => agent.id)).toEqual(["agent-1"]);
+    expect(migrated.agents[0]?.toolGrants).toBeNull();
 
     // The upgrade is durable, not just in memory.
     const onDisk = JSON.parse(await readFile(filePath, "utf8")) as {
@@ -165,13 +166,102 @@ describe("JsonStore migration", () => {
 });
 
 describe("Seeded users and ownership", () => {
+  it("keeps valid Agent grants and fails malformed explicit grants closed", async () => {
+    const filePath = await temporaryFile();
+    await writeFile(
+      filePath,
+      JSON.stringify({
+        version: DATABASE_VERSION,
+        agents: [
+          {
+            ...legacyAgent,
+            id: "valid",
+            toolGrants: ["model", "docs", "model"],
+          },
+          { ...legacyAgent, id: "unknown", toolGrants: ["model", "shell"] },
+          { ...legacyAgent, id: "wrong-shape", toolGrants: "model" },
+        ],
+      }),
+      "utf8",
+    );
+
+    const store = new JsonStore(filePath);
+    await store.initialize();
+    expect(
+      store.snapshot().agents.map((agent) => [agent.id, agent.toolGrants]),
+    ).toEqual([
+      ["valid", ["model", "docs"]],
+      ["unknown", []],
+      ["wrong-shape", []],
+    ]);
+
+    const reopened = new JsonStore(filePath);
+    await reopened.initialize();
+    expect(reopened.snapshot().agents[0]?.toolGrants).toEqual([
+      "model",
+      "docs",
+    ]);
+  });
+
+  /**
+   * `[]` and `null` are different policies, and the difference must survive a
+   * restart. An Agent deliberately granted nothing that reloads as `null`
+   * silently inherits everything its owner's role allows — the one direction
+   * this loader is never permitted to fail in.
+   */
+  it("keeps an empty grant empty across a reload rather than collapsing it to inherit", async () => {
+    const filePath = await temporaryFile();
+    await writeFile(
+      filePath,
+      JSON.stringify({
+        version: DATABASE_VERSION,
+        agents: [
+          { ...legacyAgent, id: "granted-nothing", toolGrants: [] },
+          { ...legacyAgent, id: "inherits", toolGrants: null },
+        ],
+      }),
+      "utf8",
+    );
+
+    const store = new JsonStore(filePath);
+    await store.initialize();
+    expect(
+      store.snapshot().agents.map((agent) => [agent.id, agent.toolGrants]),
+    ).toEqual([
+      ["granted-nothing", []],
+      ["inherits", null],
+    ]);
+
+    // The distinction is durable, not just an artifact of the first parse.
+    const reopened = new JsonStore(filePath);
+    await reopened.initialize();
+    expect(
+      reopened.snapshot().agents.map((agent) => [agent.id, agent.toolGrants]),
+    ).toEqual([
+      ["granted-nothing", []],
+      ["inherits", null],
+    ]);
+  });
+
   it("seeds the demo users once, not once per start", async () => {
     const filePath = await temporaryFile();
     const store = new JsonStore(filePath);
     await store.initialize();
     expect(store.snapshot().users).toEqual([
-      { id: "user-a", name: "User A", role: "admin" },
-      { id: "user-b", name: "User B", role: "basic" },
+      {
+        id: "user-a",
+        name: "User A",
+        role: "admin",
+        tokenBudget: 5_000_000,
+        budgetResetAt: null,
+      },
+      {
+        id: "user-b",
+        name: "User B",
+        role: "basic",
+        tokenBudget: 5_000_000,
+        budgetResetAt: null,
+      },
     ]);
 
     // A restart reads the seeded rows back rather than seeding beside them.
@@ -197,10 +287,25 @@ describe("Seeded users and ownership", () => {
     const store = new JsonStore(filePath);
     await store.initialize();
 
-    // The missing seed is added; the stored one is left exactly as it was.
+    // The missing seed is added; the stored one is left exactly as it was —
+    // except for the budget it predates, which loads as unlimited. That is the
+    // safe direction here: a ceiling nobody set must not strand an existing
+    // demo's Agents, and `can()` has already decided whether a call may happen.
     expect(store.snapshot().users).toEqual([
-      { id: "user-b", name: "Renamed B", role: "basic" },
-      { id: "user-a", name: "User A", role: "admin" },
+      {
+        id: "user-b",
+        name: "Renamed B",
+        role: "basic",
+        tokenBudget: 0,
+        budgetResetAt: null,
+      },
+      {
+        id: "user-a",
+        name: "User A",
+        role: "admin",
+        tokenBudget: 5_000_000,
+        budgetResetAt: null,
+      },
     ]);
   });
 

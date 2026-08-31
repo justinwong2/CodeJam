@@ -21,12 +21,26 @@ import type {
   Role,
   RunSession,
   RunSessionClaims,
+  RunUsage,
   UpdateAgentInput,
   User,
 } from "./types.js";
 import { WorkspaceManager } from "./workspace.js";
 
 const now = () => new Date().toISOString();
+
+/**
+ * What a `RunUsage` says a Codex thread has cost in total.
+ *
+ * `cachedInputTokens` is deliberately absent: it is a *subset* of
+ * `inputTokens` — the part that was served from cache — not a bucket beside it.
+ * The upstream reports `total = input + output`, so adding cached on top would
+ * count most input twice.
+ */
+function threadTokens(usage: RunUsage | null | undefined): number {
+  if (!usage) return 0;
+  return (usage.inputTokens ?? 0) + (usage.outputTokens ?? 0);
+}
 
 /** Ends a run's sessions where they stand, without pretending they were revoked. */
 function expireRunSessions(
@@ -97,15 +111,109 @@ export class AgentService implements GatewayDirectory {
    * belongs to a Run, and this has none. Noted as a limitation in SECURITY.md
    * rather than papered over with a record that names no run.
    */
-  async setUserRole(id: string, role: Role): Promise<User> {
+  async updateUser(
+    id: string,
+    changes: {
+      role?: Role | undefined;
+      tokenBudget?: number | undefined;
+      resetSpend?: boolean | undefined;
+    },
+  ): Promise<User> {
     return this.store.mutate((database) => {
       const user = database.users.find((item) => item.id === id);
       if (!user) {
         throw new HttpError(404, "User not found");
       }
-      user.role = role;
+      if (changes.role !== undefined) {
+        user.role = changes.role;
+      }
+      if (changes.tokenBudget !== undefined) {
+        user.tokenBudget = changes.tokenBudget;
+      }
+      if (changes.resetSpend) {
+        // A watermark, not a deletion: the Runs and their usage stay exactly as
+        // they were, and stop being counted from here. The caller clears this
+        // owner's in-flight meters alongside it — the store cannot, because
+        // those live in the gateway's memory.
+        user.budgetResetAt = new Date().toISOString();
+      }
       return structuredClone(user);
     });
+  }
+
+  /**
+   * What this human's Agents have already spent on the model, in tokens.
+   *
+   * Read per Agent rather than per Run, because `RunUsage` is **cumulative for
+   * the Codex thread**, not the cost of one turn. Codex resumes the thread each
+   * turn and reports the conversation's whole total, so a turn's figure already
+   * contains every turn before it — summing Runs would be summing a running
+   * total, and over-counts by roughly the number of turns.
+   *
+   * Usage is parsed when a Run finishes, so a Run still in flight contributes
+   * nothing here and is metered by the gateway instead. A Run whose usage never
+   * parsed reports nothing and is skipped; the in-flight meter is what keeps a
+   * single Run bounded regardless.
+   */
+  sumOwnerTokens(ownerId: string): number {
+    return this.store.select((database) => {
+      const owner = database.users.find((user) => user.id === ownerId);
+      const since = owner?.budgetResetAt
+        ? Date.parse(owner.budgetResetAt)
+        : null;
+      const owned = database.agents.filter(
+        (agent) => agent.ownerId === ownerId,
+      );
+
+      let total = 0;
+      for (const agent of owned) {
+        // Every completed Run of this Agent that reported usage, oldest first.
+        const reported = database.runs
+          .filter((run) => run.agentId === agent.id && run.usage)
+          .sort((a, b) =>
+            (a.completedAt ?? "").localeCompare(b.completedAt ?? ""),
+          );
+        if (reported.length === 0) continue;
+
+        // The Agent's whole thread so far. Not a sum: Codex resumes the thread
+        // each turn and reports usage for the entire conversation, so the last
+        // Run's figure already contains every Run before it. Adding them would
+        // be adding up a running total.
+        const latest = threadTokens(reported[reported.length - 1]?.usage);
+
+        // Where the ceiling started counting. Everything the thread had spent
+        // by the time spend was reset is history, so the baseline is the last
+        // figure reported before the watermark.
+        let baseline = 0;
+        if (since !== null) {
+          for (const run of reported) {
+            if (run.completedAt && Date.parse(run.completedAt) < since) {
+              baseline = threadTokens(run.usage);
+            }
+          }
+        }
+
+        // Clamped, because a thread that restarts reports a smaller total than
+        // the baseline taken from the one before it. Under-counting a fresh
+        // thread is the harmless direction; a negative would credit an owner
+        // for spend they had already made.
+        total += Math.max(0, latest - baseline);
+      }
+      return total;
+    });
+  }
+
+  /**
+   * Whether this Run's real usage has landed, which is what makes the
+   * gateway's estimate for it obsolete. A Run that finished without reporting
+   * anything is deliberately not "settled": its estimate is the only account
+   * of what it spent, so it keeps counting until it ages out.
+   */
+  hasRunSettled(runId: string): boolean {
+    return this.store.select(
+      (database) =>
+        database.runs.find((run) => run.id === runId)?.usage != null,
+    );
   }
 
   /** The seeded human behind an id, or nothing if no such human exists. */
@@ -145,6 +253,7 @@ export class AgentService implements GatewayDirectory {
     const agent: Agent = {
       id,
       ownerId,
+      toolGrants: input.toolGrants == null ? null : [...input.toolGrants],
       name: input.name.trim(),
       description: input.description?.trim() ?? "",
       instructions: input.instructions?.trim() ?? "",
@@ -161,8 +270,12 @@ export class AgentService implements GatewayDirectory {
   }
 
   async updateAgent(id: string, input: UpdateAgentInput): Promise<Agent> {
+    const changesWorkspace =
+      input.name !== undefined ||
+      input.description !== undefined ||
+      input.instructions !== undefined;
     const current = this.getAgent(id);
-    if (current.status === "busy") {
+    if (current.status === "busy" && changesWorkspace) {
       throw new HttpError(409, "Stop the active run before editing this Agent");
     }
     const updated = await this.store.mutate((database) => {
@@ -170,7 +283,7 @@ export class AgentService implements GatewayDirectory {
       if (!agent) {
         throw new HttpError(404, "Agent not found");
       }
-      if (agent.status === "busy") {
+      if (agent.status === "busy" && changesWorkspace) {
         throw new HttpError(
           409,
           "Stop the active run before editing this Agent",
@@ -181,11 +294,19 @@ export class AgentService implements GatewayDirectory {
         agent.description = input.description.trim();
       if (input.instructions !== undefined)
         agent.instructions = input.instructions.trim();
-      agent.lastError = null;
+      if (input.toolGrants !== undefined) {
+        agent.toolGrants =
+          input.toolGrants === null ? null : [...input.toolGrants];
+      }
+      // Editing what the Agent *is* dismisses the last failure report, on the
+      // assumption the edit is the response to it. Changing what the Agent may
+      // *reach* is not: a delegation change answers a policy question, not a
+      // failed Run, and it is now the one update allowed to land mid-Run.
+      if (changesWorkspace) agent.lastError = null;
       agent.updatedAt = now();
       return structuredClone(agent);
     });
-    await this.workspaces.writeInstructions(updated);
+    if (changesWorkspace) await this.workspaces.writeInstructions(updated);
     return updated;
   }
 

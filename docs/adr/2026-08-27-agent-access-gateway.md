@@ -182,9 +182,14 @@ failure-case story (diagnostic, not a denial). We keep a lightweight audit log
 
 ## Follow-Up
 
-- **Budget enforcement (stretch).** Metering is in scope; a hard-stop at a
+- **Budget enforcement (stretch).** ~~Metering is in scope; a hard-stop at a
   token/cost cap is a labeled extension hook, built on day 3 only if the core is
-  airtight.
+  airtight.~~ **Shipped 2026-08-31.** The core proved airtight, so the hook was
+  built: a per-owner token ceiling the operator sets, enforced on the model path
+  with the `402` Contract 1 reserved, and no upstream call on refusal. The
+  extension point generalized exactly as designed — the gateway was already the
+  one place every token spend crosses. See
+  [the spec's A7](../specs/2026-08-27-agent-access-gateway-design.md).
 - **Temporary / assumed roles (deferred).** Time-bound elevated roles map to the
   brief's "scoped, time-bound, revocable" language and would be the natural next
   extension; out of scope for the three-day build.

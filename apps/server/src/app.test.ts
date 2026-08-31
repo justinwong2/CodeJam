@@ -29,6 +29,17 @@ const idleRunner: AgentRunner = {
   isAvailable: async () => true,
 };
 
+/** A runner that reports token usage, so spend has something to be about. */
+const spendingRunner: AgentRunner = {
+  run: async () => ({
+    output: "",
+    threadId: null,
+    usage: { inputTokens: 120, outputTokens: 40 },
+  }),
+  cancel: async () => false,
+  isAvailable: async () => true,
+};
+
 /** A runner that keeps every credential it was handed, so a test can hunt for it. */
 function recordingRunner(): { runner: AgentRunner; runJwts: string[] } {
   const runJwts: string[] = [];
@@ -156,6 +167,65 @@ describe("HTTP boundary", () => {
       payload: JSON.stringify({ name: "x".repeat(1_100_000) }),
     });
     expect(oversized.statusCode).toBe(413);
+    await app.close();
+  });
+});
+
+describe("Agent delegated tools API", () => {
+  it("defaults to inheriting the owner role and round-trips explicit grants", async () => {
+    const { app } = await appWithStore();
+    const inherited = await app.inject({
+      method: "POST",
+      url: "/api/agents",
+      payload: { name: "Inherited" },
+    });
+    expect(inherited.statusCode).toBe(201);
+    expect((inherited.json() as { agent: Agent }).agent.toolGrants).toBeNull();
+
+    const explicit = await app.inject({
+      method: "POST",
+      url: "/api/agents",
+      payload: { name: "Restricted", toolGrants: ["model", "docs"] },
+    });
+    expect(explicit.statusCode).toBe(201);
+    const agent = (explicit.json() as { agent: Agent }).agent;
+    expect(agent.toolGrants).toEqual(["model", "docs"]);
+
+    const emptied = await app.inject({
+      method: "PATCH",
+      url: `/api/agents/${agent.id}`,
+      payload: { toolGrants: [] },
+    });
+    expect(emptied.statusCode).toBe(200);
+    expect((emptied.json() as { agent: Agent }).agent.toolGrants).toEqual([]);
+
+    const reset = await app.inject({
+      method: "PATCH",
+      url: `/api/agents/${agent.id}`,
+      payload: { toolGrants: null },
+    });
+    expect((reset.json() as { agent: Agent }).agent.toolGrants).toBeNull();
+    await app.close();
+  });
+
+  it("rejects unknown and duplicate tool grants at the request boundary", async () => {
+    const { app } = await appWithStore();
+    for (const toolGrants of [
+      ["model", "shell"],
+      ["docs", "docs"],
+    ]) {
+      const response = await app.inject({
+        method: "POST",
+        url: "/api/agents",
+        payload: { name: "Invalid", toolGrants },
+      });
+      expect(response.statusCode).toBe(400);
+    }
+    expect(
+      (await app.inject({ method: "GET", url: "/api/agents" })).json(),
+    ).toEqual({
+      agents: [],
+    });
     await app.close();
   });
 });
@@ -698,9 +768,26 @@ describe("Acting user", () => {
     const response = await app.inject({ method: "GET", url: "/api/users" });
     expect(response.statusCode).toBe(200);
     expect(JSON.parse(response.body)).toEqual({
+      delegatableToolsByRole: {
+        admin: ["model", "docs", "search", "payments"],
+        basic: ["model", "docs", "search"],
+        suspended: [],
+      },
       users: [
-        { id: "user-a", name: "User A", role: "admin" },
-        { id: "user-b", name: "User B", role: "basic" },
+        {
+          id: "user-a",
+          name: "User A",
+          role: "admin",
+          tokenBudget: 5_000_000,
+          budgetResetAt: null,
+        },
+        {
+          id: "user-b",
+          name: "User B",
+          role: "basic",
+          tokenBudget: 5_000_000,
+          budgetResetAt: null,
+        },
       ],
     });
     await app.close();
@@ -716,7 +803,13 @@ describe("Acting user", () => {
 
     expect(response.statusCode).toBe(200);
     expect(response.json()).toEqual({
-      user: { id: "user-b", name: "User B", role: "suspended" },
+      user: {
+        id: "user-b",
+        name: "User B",
+        role: "suspended",
+        tokenBudget: 5_000_000,
+        budgetResetAt: null,
+      },
     });
     // What matters is the stored fact: the gateway reads the role from here on
     // every call, so this is what a suspended owner's agents will be judged by.
@@ -727,6 +820,8 @@ describe("Acting user", () => {
       id: "user-b",
       name: "User B",
       role: "suspended",
+      tokenBudget: 5_000_000,
+      budgetResetAt: null,
     });
     await app.close();
   });
@@ -756,6 +851,173 @@ describe("Acting user", () => {
       expect(response.statusCode).toBe(400);
     }
     expect(backing.findUser("user-b")?.role).toBe("basic");
+    await app.close();
+  });
+
+  it("sets a token ceiling, and the store keeps it", async () => {
+    const { app, service: backing } = await appWithStore();
+    const response = await app.inject({
+      method: "PATCH",
+      url: "/api/users/user-b",
+      payload: { tokenBudget: 50_000 },
+    });
+
+    expect(response.statusCode).toBe(200);
+    // The stored fact is what matters: the gateway reads the ceiling from here
+    // on every call, so this is what the owner's Agents will be held to next.
+    expect(backing.findUser("user-b")?.tokenBudget).toBe(50_000);
+    // A budget change is not a role change; the role it did not name is intact.
+    expect(backing.findUser("user-b")?.role).toBe("basic");
+    await app.close();
+  });
+
+  it("takes a role and a ceiling in one change", async () => {
+    const { app, service: backing } = await appWithStore();
+    const response = await app.inject({
+      method: "PATCH",
+      url: "/api/users/user-b",
+      payload: { role: "admin", tokenBudget: 0 },
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(backing.findUser("user-b")?.role).toBe("admin");
+    expect(backing.findUser("user-b")?.tokenBudget).toBe(0);
+    await app.close();
+  });
+
+  it("refuses a ceiling that is not a whole number of tokens", async () => {
+    const { app, service: backing } = await appWithStore();
+    // A ceiling nobody could reason about is a rejection, never a ceiling. `0`
+    // already means unlimited, so a negative one has no meaning left to carry.
+    for (const tokenBudget of [-1, 1.5, "50000", null, Number.NaN]) {
+      const response = await app.inject({
+        method: "PATCH",
+        url: "/api/users/user-b",
+        payload: { tokenBudget },
+      });
+      expect(response.statusCode).toBe(400);
+    }
+    expect(backing.findUser("user-b")?.tokenBudget).toBe(5_000_000);
+    await app.close();
+  });
+
+  it("reports what each human has spent against their ceiling", async () => {
+    const { app, service: backing } = await appWithStore(spendingRunner);
+    const created = await createAgentAs(app, "user-a", "Spender");
+    const started = await app.inject({
+      method: "POST",
+      url: `/api/agents/${created.agent?.id}/messages`,
+      payload: { content: "spend something" },
+    });
+    const runId = (started.json() as { run: { id: string } }).run.id;
+    await expect.poll(() => backing.getRun(runId).status).toBe("completed");
+
+    const response = await app.inject({
+      method: "GET",
+      url: "/api/operator/spend",
+    });
+
+    expect(response.statusCode).toBe(200);
+    const spend = (
+      response.json() as {
+        spend: {
+          userId: string;
+          budget: number;
+          settled: number;
+          inFlight: number;
+        }[];
+      }
+    ).spend;
+    // Every seeded human is listed, so a ceiling with nothing spent against it
+    // is still visible rather than absent.
+    expect(spend.map((row) => row.userId)).toEqual(["user-a", "user-b"]);
+    const owner = spend.find((row) => row.userId === "user-a");
+    expect(owner?.budget).toBe(5_000_000);
+    // The two halves stay separate: this Run has completed, so its tokens are
+    // settled and nothing is estimated.
+    expect(owner?.settled).toBeGreaterThan(0);
+    expect(owner?.inFlight).toBe(0);
+    expect(spend.find((row) => row.userId === "user-b")?.settled).toBe(0);
+    await app.close();
+  });
+
+  it("reports zero spend again once it has been reset", async () => {
+    const { app, service: backing } = await appWithStore(spendingRunner);
+    const created = await createAgentAs(app, "user-a", "Spender");
+    const started = await app.inject({
+      method: "POST",
+      url: `/api/agents/${created.agent?.id}/messages`,
+      payload: { content: "spend something" },
+    });
+    const runId = (started.json() as { run: { id: string } }).run.id;
+    await expect.poll(() => backing.getRun(runId).status).toBe("completed");
+
+    await app.inject({
+      method: "PATCH",
+      url: "/api/users/user-a",
+      payload: { resetSpend: true },
+    });
+    const response = await app.inject({
+      method: "GET",
+      url: "/api/operator/spend",
+    });
+
+    const spend = (
+      response.json() as { spend: { userId: string; settled: number }[] }
+    ).spend;
+    expect(spend.find((row) => row.userId === "user-a")?.settled).toBe(0);
+    // What the operator reads and what the ceiling enforces are the same
+    // number, from the same source — the view cannot drift from the decision.
+    expect(backing.sumOwnerTokens("user-a")).toBe(0);
+    await app.close();
+  });
+
+  it("resets a human's spend without changing what they may spend", async () => {
+    const { app, service: backing } = await appWithStore();
+    const response = await app.inject({
+      method: "PATCH",
+      url: "/api/users/user-b",
+      payload: { resetSpend: true },
+    });
+
+    expect(response.statusCode).toBe(200);
+    const user = backing.findUser("user-b");
+    // The watermark is the server's to set, so it is a real moment rather than
+    // whatever a caller claimed.
+    expect(user?.budgetResetAt).not.toBeNull();
+    expect(Date.parse(user?.budgetResetAt ?? "")).toBeLessThanOrEqual(
+      Date.now(),
+    );
+    // A reset forgives spend; it is not a way to change the ceiling or a role.
+    expect(user?.tokenBudget).toBe(5_000_000);
+    expect(user?.role).toBe("basic");
+    await app.close();
+  });
+
+  it("refuses a reset that is anything other than an explicit yes", async () => {
+    const { app, service: backing } = await appWithStore();
+    // `false` is not "do nothing" — it is a body that names no change, and a
+    // timestamp is not the caller's to choose.
+    for (const resetSpend of [false, "true", 1, new Date().toISOString()]) {
+      const response = await app.inject({
+        method: "PATCH",
+        url: "/api/users/user-b",
+        payload: { resetSpend },
+      });
+      expect(response.statusCode).toBe(400);
+    }
+    expect(backing.findUser("user-b")?.budgetResetAt).toBeNull();
+    await app.close();
+  });
+
+  it("refuses a change that names neither a role nor a ceiling", async () => {
+    const { app } = await appWithStore();
+    const response = await app.inject({
+      method: "PATCH",
+      url: "/api/users/user-b",
+      payload: {},
+    });
+    expect(response.statusCode).toBe(400);
     await app.close();
   });
 

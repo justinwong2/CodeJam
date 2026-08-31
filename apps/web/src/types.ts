@@ -18,6 +18,22 @@ export interface User {
   id: string;
   name: string;
   role: Role;
+  /** Token ceiling across all this human's Agents; `0` is unlimited. */
+  tokenBudget: number;
+  /** When spend was last reset; Runs completed before it are not counted. */
+  budgetResetAt: string | null;
+}
+
+/**
+ * What one human has spent against their ceiling. `settled` and `inFlight` are
+ * deliberately separate: one is measured from completed Runs, the other
+ * estimated for Runs still going, and a single total would hide which is which.
+ */
+export interface OwnerSpend {
+  userId: string;
+  budget: number;
+  settled: number;
+  inFlight: number;
 }
 
 /**
@@ -92,6 +108,8 @@ export interface MockDoc {
 export interface Agent {
   id: string;
   ownerId: string;
+  /** `null` inherits the owner role; an array can only narrow that role. */
+  toolGrants: ToolName[] | null;
   name: string;
   description: string;
   instructions: string;

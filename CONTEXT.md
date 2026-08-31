@@ -20,6 +20,13 @@ _Avoid_: user (when the agent's acting identity is meant)
 The human a resource or Agent belongs to; the ownership key `can()` compares.
 _Avoid_: creator, author
 
+**Tool grant**:
+An Agent's delegated maximum tool set (`Agent.toolGrants`). `null` means inherit
+the Owner's role; an explicit list may only narrow that role, and `[]` grants
+nothing. The Gateway resolves it from the store per call, never from the JWT.
+_Avoid_: scope (reserved for document-search visibility), Agent role (roles
+belong to Owners), permission token
+
 **Document**:
 A small text resource in the mock tool service (`MockDoc`), owned by one user;
 the thing an ownership decision protects.
@@ -67,6 +74,31 @@ while their run credential stays valid and unrevoked: the JWT is identity,
 never permission, so suspension is a store write, not a token event.
 _Avoid_: no-access, disabled, revoked (session revocation is a different lever)
 
+**Budget**:
+A human's token ceiling (`User.tokenBudget`, `0` for unlimited), set by the
+operator and enforced on every model call. It answers "can they afford this?",
+never "may they?" — which is why a budget refusal is `402` and an authorization
+refusal is `403`, and why the budget is checked only after `can()` has allowed
+the call. It is the operator's alone: on no owner-facing route, so its subject
+cannot raise it.
+_Avoid_: quota, limit (alone), rate limit (nothing here is per unit time)
+
+**Reset spend**:
+The operator action that forgives what a human has spent without changing what
+they may spend. Both halves at once: a watermark (`User.budgetResetAt`) after
+which settled Runs stop counting, and the clearing of that owner's in-flight
+meters. A watermark rather than a deletion — the Runs, their usage, and their
+audit records survive intact; only what counts against the ceiling changes.
+_Avoid_: clear the budget, top up (nothing is added; spend is forgiven)
+
+**Settled / in-flight spend**:
+The two halves a Budget is measured against, and deliberately not the same kind
+of number. **Settled** is exact: tokens summed from the `usage` of completed
+Runs, parsed from Codex. **In-flight** is estimated: the gateway's own meter,
+derived from request body size, covering Runs that are spending right now and
+have reported nothing yet. Both are named wherever either is shown.
+_Avoid_: usage (ambiguous between the two), spend (alone)
+
 **Denial**:
 A gateway decision refusing a call. What the _agent_ is told and what the
 _audit_ records are deliberately allowed to differ: the audit always carries
@@ -78,12 +110,18 @@ owner of a Document the principal cannot read.
 - A **Document** has exactly one **Owner**; **Visibility** never transfers
   ownership
 - The **Gateway** resolves a **Principal** per call from the Agent's current
-  **Owner** — every tool, the model included
+  **Owner** and current **Tool grant** — every tool, the model included
+- Effective authority is the Owner's role intersected with the Agent's Tool
+  grant; delegation narrows and never elevates
 - An ownership **Denial** on a Document is _invisible_ to the agent (404) but a
   true `deny` in the audit
 - A **Suspended** Owner's agents keep valid credentials and pass no `can()`
   check — suspension is a store write, revocation is a session write; the
   **Operator Console** triggers both and decides neither
+- A **Budget** is the third lever of that same shape: a store write the next
+  gateway call reads. Suspension refuses what an Owner may do, a Budget refuses
+  what they can afford, and revocation ends one Run's credential — three
+  different answers that must stay distinguishable in the trail
 
 ## Example dialogue
 

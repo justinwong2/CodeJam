@@ -30,6 +30,8 @@ Volcengine ECS.
 - Agent create, edit, start, stop, delete, and multi-turn chat
 - Dev user switcher, a per-Run gateway evidence panel, and an Operator Console
   (decision feed, sessions, documents, roles) — all display-and-trigger only
+- Per-Agent delegated tool grants that narrow (and never elevate) the owner's
+  live role, including changes that apply on the next mid-run call
 - Fastify control plane with asynchronous Run state
 - Persistent Agent workspaces and Codex sessions
 - Disposable Docker, Colima, or Podman container for each local turn
@@ -140,6 +142,15 @@ and `suspended`, which takes effect on that human's Agents' next call without
 reissuing anything. Suspending a user is the strongest demo: their Agent is
 refused the model itself, not merely a tool. The console decides nothing — it
 asks the server, and shows what the server then says.
+
+Open an Agent's **Settings** to configure **Delegated gateway tools**. Keep
+**Inherit the owner role** checked for role-only behavior, or clear it and pick
+an explicit subset. The choices come from the server's current role table, so a
+basic owner never sees `payments` as something they could delegate. **Apply
+tool grants** works during a Run: remove
+`payments`, call it and observe a `403` plus one deny row; restore it and the
+same unexpired credential succeeds. The owner role remains the ceiling, so
+adding `payments` to a basic owner's Agent still denies it.
 
 ### 5. Stop and resume
 
@@ -280,8 +291,9 @@ flowchart LR
 
 Codex never holds the Ark key: it calls the gateway with a run credential, and
 the gateway attaches the real key on the way upstream, streaming the reply back.
-Model and tool calls alike are authorized against the Agent owner's live role —
-and, for a document, the resource's owner — before anything is forwarded, so a
+Model and tool calls alike are authorized against the Agent owner's live role,
+intersected with that Agent's delegated tool grants — and, for a document, the
+resource's owner — before anything is forwarded, so a
 `suspended` owner's Agent is refused the model as well as the tools. Every
 decision, allowed or denied, is recorded before the answer is sent; a Run's
 trail is readable at `GET /api/runs/:id/audit`, and the Operator Console shows

@@ -6,9 +6,19 @@ import { fileURLToPath } from "node:url";
 import { z } from "zod";
 import type { AppConfig } from "./config.js";
 import { HttpError } from "./errors.js";
-import { registerGateway } from "./gateway.js";
+import {
+  clearOwnerMeters,
+  ownerSpendInFlight,
+  registerGateway,
+} from "./gateway.js";
 import { registerMockTools } from "./mock-tools.js";
-import { DEFAULT_OWNER_ID, ROLE_NAMES, VISIBILITY_NAMES } from "./types.js";
+import {
+  DEFAULT_OWNER_ID,
+  ROLE_NAMES,
+  ROLE_TOOLS,
+  TOOL_NAMES,
+  VISIBILITY_NAMES,
+} from "./types.js";
 import type { User } from "./types.js";
 import type { AgentService } from "./agent-service.js";
 
@@ -27,12 +37,46 @@ const userIdParams = z.object({ id: z.string().trim().min(1).max(64) });
  * The whole vocabulary of a role change: one of the seeded roles, and nothing
  * else. Assigning roles is in scope for the operator; authoring them is not, so
  * an unrecognized value is a 400 rather than a role no grant table knows.
+ *
+ * The same holds for the token ceiling, so an operator's change is a role, a
+ * budget, or both. `tokenBudget` lives only here: it is on no owner-facing
+ * route, so an Agent's owner cannot raise the limit their Agents are held to.
+ * `0` means unlimited; a negative or fractional value is a `400` rather than a
+ * ceiling nobody could reason about.
+ *
+ * `resetSpend` is an action rather than a timestamp: the operator asks for a
+ * reset and the server decides when it happened. A caller that could name the
+ * moment could forgive spend selectively, or forgive it retroactively.
  */
-const updateUserBody = z.object({ role: z.enum(ROLE_NAMES) });
+const updateUserBody = z
+  .object({
+    role: z.enum(ROLE_NAMES).optional(),
+    tokenBudget: z
+      .number()
+      .int()
+      .min(0)
+      .max(Number.MAX_SAFE_INTEGER)
+      .optional(),
+    resetSpend: z.literal(true).optional(),
+  })
+  .refine(
+    (body) =>
+      body.role !== undefined ||
+      body.tokenBudget !== undefined ||
+      body.resetSpend !== undefined,
+    "Provide a role, a tokenBudget, resetSpend, or a combination",
+  );
+const toolGrants = z
+  .array(z.enum(TOOL_NAMES))
+  .max(TOOL_NAMES.length)
+  .refine((tools) => new Set(tools).size === tools.length, {
+    message: "Tool grants must not contain duplicates",
+  });
 const createAgentBody = z.object({
   name: z.string().trim().min(1).max(80),
   description: z.string().max(500).optional(),
   instructions: z.string().max(10_000).optional(),
+  toolGrants: toolGrants.nullable().optional(),
 });
 const updateAgentBody = createAgentBody
   .partial()
@@ -165,7 +209,13 @@ export async function createApp(
 
   app.get("/api/system", async () => service.systemInfo());
 
-  app.get("/api/users", async () => ({ users: service.listUsers() }));
+  // The UI renders the server's real role table rather than maintaining a
+  // second hard-coded tool list. This is display data only; `can()` still
+  // resolves and enforces the same table independently on every Agent call.
+  app.get("/api/users", async () => ({
+    users: service.listUsers(),
+    delegatableToolsByRole: ROLE_TOOLS,
+  }));
 
   // The operator's other lever, beside revocation: change what a human may do
   // rather than cutting one run off. It takes effect on that human's Agents'
@@ -174,12 +224,21 @@ export async function createApp(
   app.patch("/api/users/:id", async (request) => {
     const { id } = userIdParams.parse(request.params);
     const body = updateUserBody.parse(request.body);
-    return { user: await service.setUserRole(id, body.role) };
+    const user = await service.updateUser(id, body);
+    if (body.resetSpend) {
+      // The second half of a reset, and the reason it is done here rather than
+      // in the service: settled spend is the store's to forget, but what Runs
+      // still in flight have spent lives in the gateway's memory. Clearing only
+      // one would make "reset" mean "reset once the current run has finished".
+      // Ordered after the write, so a rejected change clears nothing.
+      clearOwnerMeters(id);
+    }
+    return { user };
   });
 
-  // The Operator Console's three reads. Behind the shared token like the rest
-  // of /api, and read-only: the console displays what the server decided and
-  // triggers the two levers that already exist. It enforces nothing.
+  // The Operator Console's reads. Behind the shared token like the rest of
+  // /api, and read-only: the console displays what the server decided and
+  // triggers the levers that already exist. It enforces nothing.
   app.get("/api/operator/audit", async () => ({
     audit: service.listAuditRecords(),
   }));
@@ -190,6 +249,20 @@ export async function createApp(
 
   app.get("/api/operator/docs", async () => ({
     docs: service.listDocumentMetadata(),
+  }));
+
+  // What each human has spent against their ceiling. Assembled here rather than
+  // in the service because the two halves live in different places: settled
+  // spend is the store's, and what Runs in flight have spent is the gateway's.
+  // Nothing here decides anything — the ceiling computes its own total on the
+  // call it is deciding about, and never reads this.
+  app.get("/api/operator/spend", async () => ({
+    spend: service.listUsers().map((user) => ({
+      userId: user.id,
+      budget: user.tokenBudget,
+      settled: service.sumOwnerTokens(user.id),
+      inFlight: ownerSpendInFlight(service, user.id, config.sessionTtlMs),
+    })),
   }));
 
   // The human half of the document surface. Scoped by the same `visibleTo` the

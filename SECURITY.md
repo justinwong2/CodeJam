@@ -33,10 +33,14 @@ credentials, personal data, or exploit details in an issue.
   operator. `GATEWAY_JWT_SECRET` signs those credentials, never leaves the
   server process, and is required at startup.
 - Every agent call is authorized as well as authenticated — the model included.
-  The gateway resolves the acting human from the Agent's current owner in the
-  store — permissions are deliberately absent from the run credential — and
-  applies `can()` before forwarding, so a role or ownership denial is a `403`
-  and nothing downstream is reached. The `suspended` role grants no tools at
+  The gateway resolves the acting human's current role and the Agent's current
+  `toolGrants` from the store — permissions are deliberately absent from the
+  run credential — and applies `can()` before forwarding. Effective authority
+  is their intersection followed by resource visibility: Agent grants can
+  remove authority but cannot add what the owner role lacks. `null` inherits,
+  `[]` grants nothing, and malformed explicit stored grants fail closed to
+  nothing. A role, Agent-grant, or ownership denial is a `403` and nothing
+  downstream is reached. The `suspended` role grants no tools at
   all, so a suspended owner's Agents cannot call a tool or spend model tokens,
   while their run credentials stay signed, unexpired, and unrevoked: the
   credential is identity, never permission. The mock tool service accepts only
@@ -64,9 +68,33 @@ credentials, personal data, or exploit details in an issue.
   there is no edit, delete, toggle, or sharing. Content is only ever returned to
   a principal `visibleTo` admits: it appears in no audit record, and in no
   operator view.
-- Operator actions are not audited. `PATCH /api/users/:id` (assign a role) and
-  `POST /api/agents/:id/revoke` leave no `AuditRecord`, because a record belongs
-  to a Run and an operator action has none. Their effect is visible in the very
+- A model call is refused when its owner has no token allowance left: `402`,
+  one audit `deny` row, and no upstream request, so a runaway or prompt-injected
+  Agent cannot spend without bound. The ceiling is `User.tokenBudget`, set only
+  through `PATCH /api/users/:id` — it is on no owner-facing route, so an Agent's
+  owner can spend their allowance but cannot raise it. What the ceiling is
+  measured against is deliberately two different kinds of number: tokens
+  reported by **completed** Runs are exact, while a Run still in flight is
+  **estimated** from request size, because reading real per-call usage would
+  mean parsing the response stream the gateway forwards untouched. The exact
+  half is read per Agent rather than per Run: Codex reports usage cumulatively
+  for a resumed thread, so an Agent's latest figure is its total and summing its
+  Runs would count the same tokens once per turn. Consequences
+  worth knowing: a Run whose usage never parsed counts as zero (fail-open, with
+  the in-flight meter as the backstop); the in-flight meter is process memory,
+  consistent with the single-process store; and tool calls are not budgeted at
+  all, since the ceiling is about model tokens and `payments` amounts are a mock.
+- Spend can be forgiven, but only by the operator. `PATCH /api/users/:id` with
+  `resetSpend: true` marks `User.budgetResetAt` and clears that owner's
+  in-flight meters, so their allowance starts over. It is a watermark, never a
+  deletion — the Runs, their token usage, and their audit records are untouched,
+  and the reset moment is chosen by the server rather than named by the caller.
+  It changes what counts against the ceiling and nothing else: not the ceiling,
+  not the role.
+- Operator actions are not audited. `PATCH /api/users/:id` (assign a role, set a
+  token budget, or reset spend), Agent tool-grant changes, and
+  `POST /api/agents/:id/revoke` leave no `AuditRecord`,
+  because a record belongs to a Run and an operator action has none. Their effect is visible in the very
   next gateway decision, and in the Operator Console's session table, but there
   is no "who changed this role, and when". Accepted for POC scope; a real
   deployment needs a separate operator-action log, and neither endpoint is

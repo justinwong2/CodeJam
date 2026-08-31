@@ -18,6 +18,25 @@ export interface User {
   id: string;
   name: string;
   role: Role;
+  /**
+   * The most this human's Agents may spend on the model, in tokens, across
+   * every Run they have ever made. `0` is unlimited.
+   *
+   * A ceiling rather than an allocation: it is the operator's to set, never the
+   * owner's, so an Agent cannot raise the limit it is being held to — the same
+   * reason a role is not carried in a run credential.
+   */
+  tokenBudget: number;
+  /**
+   * When this human's spend was last reset, or `null` if it never was. Runs
+   * that completed before it are not counted against the ceiling.
+   *
+   * A watermark rather than a stored counter: Run `usage` stays the single
+   * source of truth and is never rewritten, so resetting an allowance costs no
+   * history — the Runs, their tokens, and their audit records are all still
+   * there to read.
+   */
+  budgetResetAt: string | null;
 }
 
 /**
@@ -36,9 +55,8 @@ export const ROLE_TOOLS: Record<Role, ToolName[]> = {
 };
 
 /**
- * Who a gateway call is acting as. The human owner is the ownership key: an
- * Agent never has authority of its own, only the authority of the human it
- * runs for.
+ * Who a gateway call is acting as. The human owner is the ownership key and
+ * sets the maximum authority; the Agent's delegated grants may only narrow it.
  */
 export interface Principal {
   /** The acting human. */
@@ -49,11 +67,15 @@ export interface Principal {
   runId: string;
   /** Resolved server-side from the owner, not read from the credential. */
   role: Role;
+  /** Resolved server-side from the Agent on every call; `null` inherits role. */
+  toolGrants: ToolName[] | null;
 }
 
 export interface Agent {
   id: string;
   ownerId: string;
+  /** `null` inherits the owner's role; an array is an Agent-specific ceiling. */
+  toolGrants: ToolName[] | null;
   name: string;
   description: string;
   instructions: string;
@@ -113,6 +135,24 @@ export interface RunSession {
   revoked: boolean;
   createdAt: string;
   expiresAt: string;
+}
+
+/**
+ * What one human has spent against their ceiling, assembled for the operator.
+ *
+ * A view rather than a record: nothing stores this. `settled` and `inFlight`
+ * stay separate fields on purpose, because they are not the same kind of
+ * number — one is measured, the other estimated — and a single total would
+ * hide which half is which.
+ */
+export interface OwnerSpend {
+  userId: string;
+  /** The ceiling; `0` is unlimited. */
+  budget: number;
+  /** Exact: tokens reported by completed Runs since the last reset. */
+  settled: number;
+  /** Estimated: what Runs still in flight have spent, from request sizes. */
+  inFlight: number;
 }
 
 /**
@@ -206,12 +246,14 @@ export interface CreateAgentInput {
   name: string;
   description?: string | undefined;
   instructions?: string | undefined;
+  toolGrants?: ToolName[] | null | undefined;
 }
 
 export interface UpdateAgentInput {
   name?: string | undefined;
   description?: string | undefined;
   instructions?: string | undefined;
+  toolGrants?: ToolName[] | null | undefined;
 }
 
 /**
@@ -270,6 +312,24 @@ export interface GatewayDirectory extends RunSessionDirectory, AuditSink {
   findAgent(id: string): Agent | undefined;
   findUser(id: string): User | undefined;
   findMockDoc(id: string): MockDoc | undefined;
+  /**
+   * Tokens this human's Agents have already spent, summed from the `usage` of
+   * their **completed** Runs. A Run still in flight has not reported usage yet
+   * and is counted by the gateway's own meter instead.
+   *
+   * Answers `0` for a human with no completed Runs, and for one the store does
+   * not know — a missing record is never an excuse to skip a ceiling.
+   */
+  sumOwnerTokens(ownerId: string): number;
+  /**
+   * Whether this Run has reported its real token usage yet.
+   *
+   * The moment it has, the gateway's estimate for that Run is superseded and
+   * must stop counting — otherwise the same tokens are counted twice, once
+   * guessed and once measured. Answers `false` for a Run the store does not
+   * know, so an estimate is never dropped on the strength of a missing record.
+   */
+  hasRunSettled(runId: string): boolean;
 }
 
 export interface AgentRunner {

@@ -13,9 +13,11 @@ import type {
   Message,
   MockDoc,
   MockDocMetadata,
+  OwnerSpend,
   Role,
   RunSessionClaims,
   SystemInfo,
+  ToolName,
   User,
   Visibility,
 } from "./types";
@@ -27,11 +29,19 @@ const starterPrompts = [
   "Build a responsive single-page todo app with tests.",
 ];
 
-const emptyForm = {
+interface AgentForm {
+  name: string;
+  description: string;
+  instructions: string;
+  toolGrants: ToolName[] | null;
+}
+
+const emptyForm: AgentForm = {
   name: "",
   description: "",
   instructions:
     "Help me build and test software in this workspace. Keep changes small and explain the result.",
+  toolGrants: null,
 };
 
 function formatTime(value: string): string {
@@ -88,6 +98,107 @@ function Spinner() {
   return <span className="spinner" aria-label="Loading" />;
 }
 
+function ToolGrantEditor({
+  value,
+  availableTools,
+  onChange,
+  disabled = false,
+}: {
+  value: ToolName[] | null;
+  availableTools: ToolName[];
+  onChange: (value: ToolName[] | null) => void;
+  disabled?: boolean;
+}) {
+  const inherited = value === null;
+  // A grant outside the owner's current role is still stored policy: the server
+  // intersects role and grants on every call, so a narrowed role hides what an
+  // Agent was delegated without erasing it. Rendering only the ceiling would
+  // make the editor invisibly drop the grants it could not show.
+  const shown = [...new Set([...availableTools, ...(value ?? [])])];
+  return (
+    <fieldset className="tool-grants" disabled={disabled}>
+      <legend>Delegated gateway tools</legend>
+      <label className="inherit-grants">
+        <input
+          type="checkbox"
+          checked={inherited}
+          onChange={(event) =>
+            onChange(event.target.checked ? null : [...availableTools])
+          }
+        />
+        Inherit the owner role
+      </label>
+      <div className="tool-grant-options">
+        {shown.map((tool) => {
+          const withinCeiling = availableTools.includes(tool);
+          return (
+            <label
+              key={tool}
+              className={withinCeiling ? undefined : "grant-above-ceiling"}
+              title={
+                withinCeiling
+                  ? undefined
+                  : "Delegated to this Agent, but the owner's current role denies it"
+              }
+            >
+              <input
+                type="checkbox"
+                checked={inherited || value.includes(tool)}
+                disabled={disabled || inherited}
+                onChange={(event) => {
+                  const current = value ?? [];
+                  onChange(
+                    event.target.checked
+                      ? [...current, tool]
+                      : current.filter((item) => item !== tool),
+                  );
+                }}
+              />
+              {tool}
+              {withinCeiling ? null : <span aria-hidden="true">🚫</span>}
+            </label>
+          );
+        })}
+      </div>
+      <small>
+        The owner&apos;s current role is always the ceiling. These grants can
+        restrict an Agent, never elevate it.
+      </small>
+    </fieldset>
+  );
+}
+
+const tokens = (value: number): string => value.toLocaleString("en-US");
+
+/**
+ * What one human has spent against their ceiling.
+ *
+ * The two halves are shown as two things rather than one total, because they
+ * are not the same kind of number: settled spend is measured from Runs that
+ * finished, while in-flight spend is the gateway's estimate for Runs still
+ * going. Summing them into a single figure would present a guess with the same
+ * confidence as a measurement.
+ */
+function SpendCell({ spend }: { spend: OwnerSpend | undefined }) {
+  if (!spend) return <span className="spend-idle">—</span>;
+  const used = spend.settled + spend.inFlight;
+  const share = spend.budget > 0 ? used / spend.budget : 0;
+  return (
+    <span className="spend">
+      <span className={share >= 1 ? "spend-used spend-over" : "spend-used"}>
+        {tokens(used)}
+        {spend.budget > 0 ? " / " + tokens(spend.budget) : ""}
+      </span>
+      {spend.inFlight > 0 ? (
+        <span className="spend-detail">
+          {tokens(spend.settled)} settled · {tokens(spend.inFlight)} in flight
+          (est.)
+        </span>
+      ) : null}
+    </span>
+  );
+}
+
 /**
  * The Operator Console: the decision feed, the ground truth behind it, and the
  * two levers the platform already has — revoke a run's credentials, change what
@@ -100,17 +211,23 @@ function OperatorConsole({
   audit,
   sessions,
   docs,
+  spend,
   users,
   ownerName,
   onAssignRole,
+  onAssignTokenBudget,
+  onResetSpend,
   onRevoke,
 }: {
   audit: AuditRecord[];
   sessions: RunSessionClaims[];
   docs: MockDocMetadata[];
+  spend: OwnerSpend[];
   users: User[];
   ownerName: (ownerId: string) => string;
   onAssignRole: (id: string, role: Role) => void;
+  onAssignTokenBudget: (id: string, tokenBudget: number) => void;
+  onResetSpend: (id: string) => void;
   onRevoke: (agentId: string) => void;
 }) {
   // Newest first: an operator watching a demo cares about the decision that
@@ -161,6 +278,8 @@ function OperatorConsole({
               <th>Human</th>
               <th>Id</th>
               <th>Role</th>
+              <th>Spend</th>
+              <th>Token budget</th>
             </tr>
           </thead>
           <tbody>
@@ -182,6 +301,49 @@ function OperatorConsole({
                       </option>
                     ))}
                   </select>
+                </td>
+                <td>
+                  <SpendCell
+                    spend={spend.find((row) => row.userId === user.id)}
+                  />
+                </td>
+                <td>
+                  {/*
+                    Committed on blur rather than on every keystroke: each
+                    change is a server write that the next gateway call reads,
+                    and typing "50000" should not spend four intermediate
+                    ceilings on its way there.
+                  */}
+                  <input
+                    type="number"
+                    min={0}
+                    step={1000}
+                    className="budget-input"
+                    aria-label={"Token budget for " + user.name}
+                    defaultValue={user.tokenBudget}
+                    key={user.id + ":" + String(user.tokenBudget)}
+                    onBlur={(event) => {
+                      const next = Number(event.target.value);
+                      if (!Number.isInteger(next) || next < 0) return;
+                      if (next === user.tokenBudget) return;
+                      onAssignTokenBudget(user.id, next);
+                    }}
+                  />
+                  <span className="budget-hint">
+                    {user.tokenBudget === 0 ? "unlimited" : "tokens"}
+                  </span>
+                  {/*
+                    Forgets what was spent, not what may be spent. Raising the
+                    ceiling would also unblock a spent-out human, but it moves
+                    the goalposts; this restores the allowance they were given.
+                  */}
+                  <button
+                    type="button"
+                    className="button button-ghost console-button budget-reset"
+                    onClick={() => onResetSpend(user.id)}
+                  >
+                    Reset spend
+                  </button>
                 </td>
               </tr>
             ))}
@@ -494,6 +656,9 @@ export default function App() {
   const [messages, setMessages] = useState<Message[]>([]);
   const [system, setSystem] = useState<SystemInfo | null>(null);
   const [users, setUsers] = useState<User[]>([]);
+  const [delegatableToolsByRole, setDelegatableToolsByRole] = useState<
+    Partial<Record<Role, ToolName[]>>
+  >({});
   const [actingUser, setActingUser] = useState(getActingUserId);
   const [showCreate, setShowCreate] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
@@ -520,7 +685,8 @@ export default function App() {
     audit: AuditRecord[];
     sessions: RunSessionClaims[];
     docs: MockDocMetadata[];
-  }>({ audit: [], sessions: [], docs: [] });
+    spend: OwnerSpend[];
+  }>({ audit: [], sessions: [], docs: [], spend: [] });
   const [error, setError] = useState<string | null>(null);
   const [authRequired, setAuthRequired] = useState<boolean | null>(null);
   const [authInput, setAuthInput] = useState("");
@@ -575,7 +741,10 @@ export default function App() {
     await Promise.all([
       refreshAgents(),
       api.system().then(setSystem),
-      api.users().then((result) => setUsers(result.users)),
+      api.users().then((result) => {
+        setUsers(result.users);
+        setDelegatableToolsByRole(result.delegatableToolsByRole);
+      }),
     ]);
   }, [refreshAgents]);
 
@@ -600,18 +769,21 @@ export default function App() {
    * what happened and the browser's copy is only a picture of it.
    */
   const refreshConsole = useCallback(async () => {
-    const [audit, sessions, docs, people] = await Promise.all([
+    const [audit, sessions, docs, spend, people] = await Promise.all([
       api.operatorAudit(),
       api.operatorSessions(),
       api.operatorDocs(),
+      api.operatorSpend(),
       api.users(),
     ]);
     setOperatorData({
       audit: audit.audit,
       sessions: sessions.sessions,
       docs: docs.docs,
+      spend: spend.spend,
     });
     setUsers(people.users);
+    setDelegatableToolsByRole(people.delegatableToolsByRole);
   }, []);
 
   /**
@@ -624,6 +796,38 @@ export default function App() {
     try {
       await api.setUserRole(id, role);
       await Promise.all([refreshConsole(), refreshAgents()]);
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : String(reason));
+    }
+  };
+
+  /**
+   * Sets a human's token ceiling. Like a role, it is written server-side and
+   * read on the next gateway call, so lowering it lands on a run already in
+   * flight. The browser neither meters nor enforces: it shows what the server
+   * decided, in the evidence panel, one decision at a time.
+   */
+  const assignTokenBudget = async (id: string, tokenBudget: number) => {
+    setError(null);
+    try {
+      await api.setUserTokenBudget(id, tokenBudget);
+      await refreshConsole();
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : String(reason));
+    }
+  };
+
+  /**
+   * Forgets what this human has spent, without touching what they may spend.
+   * The server marks the moment and clears the meters for Runs still going, so
+   * the next gateway call starts from zero — a clean start rather than a raised
+   * ceiling, which is the operator action a spent-out demo actually wants.
+   */
+  const resetSpend = async (id: string) => {
+    setError(null);
+    try {
+      await api.resetUserSpend(id);
+      await refreshConsole();
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : String(reason));
     }
@@ -680,6 +884,17 @@ export default function App() {
 
   const ownerRole = (ownerId: string) => usersById.get(ownerId)?.role ?? null;
 
+  /** Display choices come from the server's live role table, never a UI copy. */
+  const availableToolsFor = (ownerId: string): ToolName[] => {
+    const role = ownerRole(ownerId);
+    return role ? (delegatableToolsByRole[role] ?? []) : [];
+  };
+
+  // Grants are sent exactly as edited. The owner's role is a ceiling the server
+  // applies on every call, not something the browser may bake into the stored
+  // policy: filtering here would turn a reversible role change into a permanent
+  // rewrite, so a narrowed-then-restored role would never get its grants back.
+
   // Only ever show evidence belonging to the Run on screen, so switching Runs
   // cannot leave one Run's decisions filed under another's name.
   const auditRecords =
@@ -731,6 +946,7 @@ export default function App() {
         name: selected.name,
         description: selected.description,
         instructions: selected.instructions,
+        toolGrants: selected.toolGrants,
       });
     }
   }, [selected]);
@@ -823,6 +1039,20 @@ export default function App() {
       await api.updateAgent(selected.id, form);
       await refreshAgents();
       setShowSettings(false);
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : String(reason));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const saveAgentToolGrants = async () => {
+    if (!selected) return;
+    setBusy(true);
+    setError(null);
+    try {
+      await api.updateAgent(selected.id, { toolGrants: form.toolGrants });
+      await refreshAgents();
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : String(reason));
     } finally {
@@ -1143,9 +1373,14 @@ export default function App() {
             audit={operatorData.audit}
             sessions={operatorData.sessions}
             docs={operatorData.docs}
+            spend={operatorData.spend}
             users={users}
             ownerName={ownerName}
             onAssignRole={(id, role) => void assignRole(id, role)}
+            onAssignTokenBudget={(id, tokenBudget) =>
+              void assignTokenBudget(id, tokenBudget)
+            }
+            onResetSpend={(id) => void resetSpend(id)}
             onRevoke={(agentId) => void revokeSessions(agentId)}
           />
         ) : view === "documents" ? (
@@ -1181,7 +1416,7 @@ export default function App() {
                 <button
                   className="button button-ghost"
                   onClick={() => setShowSettings((value) => !value)}
-                  disabled={busy || selected.status === "busy"}
+                  disabled={busy}
                 >
                   Settings
                 </button>
@@ -1223,6 +1458,7 @@ export default function App() {
                       }
                       required
                       maxLength={80}
+                      disabled={selected.status === "busy"}
                     />
                   </label>
                   <label>
@@ -1233,6 +1469,7 @@ export default function App() {
                         setForm({ ...form, description: event.target.value })
                       }
                       maxLength={500}
+                      disabled={selected.status === "busy"}
                     />
                   </label>
                 </div>
@@ -1245,13 +1482,33 @@ export default function App() {
                     }
                     rows={5}
                     maxLength={10_000}
+                    disabled={selected.status === "busy"}
                   />
                 </label>
+                <ToolGrantEditor
+                  value={form.toolGrants}
+                  availableTools={availableToolsFor(selected.ownerId)}
+                  onChange={(toolGrants) => setForm({ ...form, toolGrants })}
+                  disabled={busy}
+                />
                 <div className="panel-footer">
                   <code>{selected.workspacePath}</code>
-                  <button className="button button-primary" disabled={busy}>
-                    {busy ? <Spinner /> : "Save changes"}
-                  </button>
+                  <div className="panel-actions">
+                    <button
+                      type="button"
+                      className="button button-ghost"
+                      onClick={() => void saveAgentToolGrants()}
+                      disabled={busy}
+                    >
+                      Apply tool grants
+                    </button>
+                    <button
+                      className="button button-primary"
+                      disabled={busy || selected.status === "busy"}
+                    >
+                      {busy ? <Spinner /> : "Save changes"}
+                    </button>
+                  </div>
                 </div>
               </form>
             )}
@@ -1497,11 +1754,18 @@ export default function App() {
                 maxLength={10_000}
               />
             </label>
+            <ToolGrantEditor
+              value={form.toolGrants}
+              availableTools={availableToolsFor(actingUser)}
+              onChange={(toolGrants) => setForm({ ...form, toolGrants })}
+              disabled={busy}
+            />
             <p className="owner-note">
               The server records this Agent as owned by{" "}
               <strong>{ownerName(actingUser)}</strong>
               {ownerRole(actingUser) ? " (" + ownerRole(actingUser) + ")" : ""}.
-              Its Runs get that owner&apos;s authority, and no more.
+              Its Runs get at most that owner&apos;s authority; delegated tools
+              may narrow it further.
             </p>
             <div className="modal-footer">
               <button

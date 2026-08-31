@@ -660,6 +660,59 @@ textarea:focus {
   margin-top: 13px;
 }
 
+.tool-grants {
+  margin: 13px 0 0;
+  padding: 12px;
+  border: 1px solid #e0ddd4;
+  border-radius: 10px;
+}
+
+.tool-grants legend {
+  padding: 0 5px;
+  color: #575851;
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.tool-grants label {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+}
+
+.tool-grants input[type="checkbox"] {
+  width: 14px;
+  height: 14px;
+  margin: 0;
+}
+
+.tool-grant-options {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 9px 16px;
+  margin: 11px 0;
+}
+
+/* Delegated to the Agent, but denied by the owner's role right now. Shown
+   rather than hidden: it is stored policy, and it comes back if the role does. */
+.grant-above-ceiling {
+  opacity: 0.65;
+  text-decoration: line-through;
+  text-decoration-color: #b4b0a4;
+}
+
+.tool-grants small {
+  color: var(--muted);
+  font-size: 9px;
+  line-height: 1.4;
+}
+
+.panel-actions {
+  display: flex;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
 .panel-footer {
   margin-top: 13px;
   display: flex;
@@ -1152,6 +1205,10 @@ textarea:focus {
   margin-top: 13px;
 }
 
+.modal > .tool-grants {
+  margin-top: 13px;
+}
+
 .modal-footer {
   display: flex;
   justify-content: flex-end;
@@ -1515,6 +1572,54 @@ textarea:focus {
   font-size: 11px;
   font-weight: 600;
   cursor: pointer;
+}
+
+.console-table .budget-input {
+  width: 104px;
+  height: 28px;
+  padding: 0 8px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: white;
+  color: var(--ink);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11px;
+  text-align: right;
+}
+
+.console-table .budget-hint {
+  margin-left: 8px;
+  color: #6f7068;
+  font-size: 10px;
+}
+
+.console-table .budget-reset {
+  margin-left: 10px;
+}
+
+.console-table .spend {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.console-table .spend-used {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11px;
+}
+
+.console-table .spend-over {
+  color: var(--deny, #b23c3c);
+  font-weight: 600;
+}
+
+.console-table .spend-detail {
+  color: #6f7068;
+  font-size: 10px;
+}
+
+.console-table .spend-idle {
+  color: #9a9b93;
 }
 
 .console-empty {

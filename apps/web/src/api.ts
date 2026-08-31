@@ -5,9 +5,11 @@ import type {
   Message,
   MockDoc,
   MockDocMetadata,
+  OwnerSpend,
   Role,
   RunSessionClaims,
   SystemInfo,
+  ToolName,
   User,
   Visibility,
 } from "./types";
@@ -91,12 +93,17 @@ async function request<T>(url: string, options?: RequestInit): Promise<T> {
 export const api = {
   auth: () => request<{ required: boolean }>("/api/auth"),
   system: () => request<SystemInfo>("/api/system"),
-  users: () => request<{ users: User[] }>("/api/users"),
+  users: () =>
+    request<{
+      users: User[];
+      delegatableToolsByRole: Record<Role, ToolName[]>;
+    }>("/api/users"),
   listAgents: () => request<{ agents: Agent[] }>("/api/agents"),
   createAgent: (body: {
     name: string;
     description: string;
     instructions: string;
+    toolGrants: ToolName[] | null;
   }) =>
     request<{ agent: Agent }>("/api/agents", {
       method: "POST",
@@ -104,7 +111,12 @@ export const api = {
     }),
   updateAgent: (
     id: string,
-    body: { name: string; description: string; instructions: string },
+    body: Partial<{
+      name: string;
+      description: string;
+      instructions: string;
+      toolGrants: ToolName[] | null;
+    }>,
   ) =>
     request<{ agent: Agent }>("/api/agents/" + id, {
       method: "PATCH",
@@ -159,10 +171,21 @@ export const api = {
     request<{ sessions: RunSessionClaims[] }>("/api/operator/sessions"),
   operatorDocs: () =>
     request<{ docs: MockDocMetadata[] }>("/api/operator/docs"),
+  operatorSpend: () => request<{ spend: OwnerSpend[] }>("/api/operator/spend"),
   setUserRole: (id: string, role: Role) =>
     request<{ user: User }>("/api/users/" + id, {
       method: "PATCH",
       body: JSON.stringify({ role }),
+    }),
+  setUserTokenBudget: (id: string, tokenBudget: number) =>
+    request<{ user: User }>("/api/users/" + id, {
+      method: "PATCH",
+      body: JSON.stringify({ tokenBudget }),
+    }),
+  resetUserSpend: (id: string) =>
+    request<{ user: User }>("/api/users/" + id, {
+      method: "PATCH",
+      body: JSON.stringify({ resetSpend: true }),
     }),
   revokeAgentSessions: (id: string) =>
     request<{ revokedSessions: number }>("/api/agents/" + id + "/revoke", {

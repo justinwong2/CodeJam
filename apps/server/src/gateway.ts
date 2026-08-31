@@ -3,6 +3,7 @@ import { once } from "node:events";
 import { PassThrough } from "node:stream";
 import { AuditLog, type AuditIdentity } from "./audit.js";
 import { can, type OwnedResource } from "./authz.js";
+import { estimateTokens, withinBudget } from "./budget.js";
 import type { AppConfig } from "./config.js";
 import {
   DOCUMENT_NOT_FOUND,
@@ -19,6 +20,7 @@ import type {
   Principal,
   RunSession,
   ToolName,
+  User,
 } from "./types.js";
 
 // The gateway is the machine-facing half of the control plane: Codex talks to
@@ -237,7 +239,7 @@ async function proxyResponses(
       resolution.reason,
     );
   }
-  const principal = resolution.principal;
+  const { principal, owner } = resolution;
 
   const decision = can(principal, "model");
   if (!decision.allow) {
@@ -252,20 +254,58 @@ async function proxyResponses(
     );
   }
 
+  // What this call will cost, before it is allowed to cost it. Asking "would
+  // this take the owner over?" rather than "have they already gone over?" is
+  // what keeps the ceiling from being discovered only once it is breached —
+  // and the in-flight meter is why a Run that is looping right now is bounded,
+  // rather than counted after it has finished spending.
+  const body = request.body;
+  const now = Date.now();
+  pruneRunMeters(directory, config.sessionTtlMs, now);
+  const estimated = estimateTokens(Buffer.isBuffer(body) ? body.byteLength : 0);
+  const budget = withinBudget(
+    {
+      settled: directory.sumOwnerTokens(principal.ownerId),
+      inFlight: projectedInFlight(principal.ownerId, estimated),
+    },
+    owner.tokenBudget,
+  );
+  if (!budget.allow) {
+    // 402, not 403: the call was authorized and refused anyway. Contract 1
+    // reserved this status for exactly this, and the distinction is what tells
+    // an operator "they may, but they cannot afford to" apart from "they may
+    // not."
+    return deny(
+      audit,
+      request,
+      reply,
+      principal,
+      "model",
+      null,
+      budget.reason,
+      402,
+    );
+  }
+
   // Recorded before the call is made, not after it returns. What is being
   // recorded is the gateway's decision to allow it, which is already final —
   // and evidence written afterwards would go missing exactly when the forward
   // did. A store that cannot accept the record stops the call: an allowed
   // request the store cannot vouch for is worse than a failed one.
+  //
+  // The running total rides along in the reason, so the evidence panel shows
+  // spend climbing toward a refusal instead of a refusal arriving from nowhere.
+  // It is still one record for one decision: the count is a property of the
+  // decision, not a second row about it.
   await audit.record({
     identity: principal,
     tool: "model",
     resource: null,
     decision: "allow",
-    reason: decision.reason,
+    reason: `${decision.reason}; ${budget.reason}`,
   });
+  chargeRun(principal.runId, principal.ownerId, estimated, now);
 
-  const body = request.body;
   let upstream: Response;
   try {
     upstream = await fetch(`${config.arkBaseUrl}/responses`, {
@@ -294,8 +334,139 @@ async function proxyResponses(
   return reply.send(passthrough);
 }
 
+/**
+ * What Runs still in flight have spent, so far, as the gateway estimated it.
+ *
+ * In memory rather than in the store because it is working state, not evidence:
+ * it is written on every model call, and a Run that ends — or a process that
+ * restarts — has nothing worth keeping. That is safe precisely because the
+ * startup sweep revokes the sessions of interrupted Runs, so a meter can never
+ * outlive the credential it was counting.
+ *
+ * Keyed by Run because a Run is what starts and ends; an owner's in-flight
+ * total is the sum of their live Runs.
+ */
+interface RunMeter {
+  ownerId: string;
+  tokens: number;
+  touchedAt: number;
+}
+
+const runMeters = new Map<string, RunMeter>();
+
+/**
+ * Drops meters for Runs that can no longer be spending: a session outlives its
+ * Run by at most its own TTL, so anything untouched for longer has certainly
+ * ended. Pruning on read keeps this to the live set without a timer to own.
+ */
+function pruneRunMeters(
+  directory: GatewayDirectory,
+  ttlMs: number,
+  now: number,
+): void {
+  for (const [runId, meter] of runMeters) {
+    // Superseded: the Run has reported what it really cost, so the estimate is
+    // not merely stale but wrong to keep — those tokens are now counted exactly
+    // as settled spend, and leaving the guess in place would charge them twice.
+    if (directory.hasRunSettled(runId)) {
+      runMeters.delete(runId);
+      continue;
+    }
+    // Aged out: a Run that reported nothing and can no longer be spending,
+    // since a session outlives its Run by at most its own TTL.
+    if (now - meter.touchedAt > ttlMs) runMeters.delete(runId);
+  }
+}
+
+/** What this owner's in-flight Runs have spent, across all of them. */
+function inFlightTokens(ownerId: string): number {
+  let total = 0;
+  for (const meter of runMeters.values()) {
+    if (meter.ownerId === ownerId) total += meter.tokens;
+  }
+  return total;
+}
+
+/**
+ * What this owner's in-flight spend would be if this call were forwarded: what
+ * their live Runs have spent already, plus what this call is about to cost.
+ */
+function projectedInFlight(ownerId: string, estimated: number): number {
+  return inFlightTokens(ownerId) + estimated;
+}
+
+/**
+ * Adds a forwarded call's estimated cost to its Run's meter.
+ *
+ * A sum, because calls within a Run each cost something: Ark's thread is
+ * resumed server-side, so a request carries the turn's own content rather than
+ * the whole conversation, and a Run making ten calls costs ten calls' worth.
+ * Measured against real usage, a ten-call Run cost ~50,000 tokens where its
+ * largest single call was ~5,000 — taking a maximum would under-count it
+ * tenfold.
+ *
+ * Note the asymmetry with settled spend, which takes an Agent's *latest*
+ * `RunUsage` rather than a sum. The two are not inconsistent: `RunUsage` is
+ * cumulative for the thread, so each Run's figure already contains the Runs
+ * before it, while a request body contains only its own call.
+ */
+function chargeRun(
+  runId: string,
+  ownerId: string,
+  estimated: number,
+  now: number,
+): void {
+  const meter = runMeters.get(runId);
+  if (meter) {
+    meter.tokens += estimated;
+    meter.touchedAt = now;
+    return;
+  }
+  runMeters.set(runId, { ownerId, tokens: estimated, touchedAt: now });
+}
+
+/**
+ * What this owner's live Runs have spent so far, as the gateway estimated it.
+ *
+ * A read for the operator's benefit, not part of any decision — the ceiling
+ * computes its own total inline. Stale meters are pruned first so a number
+ * shown to a human is never inflated by Runs that have long since ended.
+ */
+export function ownerSpendInFlight(
+  directory: GatewayDirectory,
+  ownerId: string,
+  ttlMs: number,
+): number {
+  pruneRunMeters(directory, ttlMs, Date.now());
+  return inFlightTokens(ownerId);
+}
+
+/**
+ * Forgets what this owner's live Runs have spent so far.
+ *
+ * The other half of resetting an allowance: the store's watermark stops
+ * counting completed Runs, and this stops counting the ones still going. Both
+ * are needed for a reset to mean "clean start" rather than "clean start once
+ * whatever is running now has finished".
+ */
+export function clearOwnerMeters(ownerId: string): void {
+  for (const [runId, meter] of runMeters) {
+    if (meter.ownerId === ownerId) runMeters.delete(runId);
+  }
+}
+
+/** Test seam: the meter is process state, and a test must start from zero. */
+export function resetRunMeters(): void {
+  runMeters.clear();
+}
+
 type PrincipalResolution =
-  | { resolved: true; principal: Principal }
+  /**
+   * `owner` is the same record the principal was assembled from, handed back so
+   * a caller that needs a ceiling as well as a role does not look the human up
+   * twice — and cannot look up a *different* human than the one authorized.
+   */
+  | { resolved: true; principal: Principal; owner: User }
   | { resolved: false; reason: string };
 
 /**
@@ -325,12 +496,14 @@ function resolvePrincipal(
   }
   return {
     resolved: true,
+    owner,
     principal: {
       humanId: owner.id,
       ownerId: owner.id,
       agentId: agent.id,
       runId: session.runId,
       role: owner.role,
+      toolGrants: agent.toolGrants,
     },
   };
 }
@@ -550,8 +723,13 @@ async function proxyTool(
 }
 
 /**
- * One shape for every authorization refusal, on either route: 403, the reason
+ * One shape for every refusal the gateway decides, on either route: the reason
  * the caller is given, and one record carrying that same reason.
+ *
+ * The status defaults to the authorization answer. `402` is the one deliberate
+ * departure — a budget refusal is not a permission failure, and Contract 1
+ * reserved that status so "they may, but they cannot afford to" stays
+ * distinguishable from "they may not" to whoever reads the trail.
  */
 async function deny(
   audit: AuditLog,
@@ -561,13 +739,14 @@ async function deny(
   tool: ToolName | null,
   resource: string | null,
   reason: string,
+  status = 403,
 ): Promise<FastifyReply> {
   request.log.warn(
-    { reason, ...(tool ? { tool } : {}) },
+    { reason, status, ...(tool ? { tool } : {}) },
     "Gateway denied an agent call",
   );
   await recordDenial(audit, request, identity, tool, resource, reason);
-  return reply.code(403).send({ error: reason });
+  return reply.code(status).send({ error: reason });
 }
 
 /**
